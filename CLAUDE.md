@@ -8,18 +8,17 @@ Arduino/PlatformIO firmware for an ESP32-C3 Super Mini driving a 1.28" round GC9
 
 ## Commands
 
-There is one PlatformIO environment, `supermini`. The repo has no unit tests or linter. CI (`.github/workflows/build.yml`) only checks that the firmware builds.
+There is one PlatformIO environment, `qualia` (pioarduino platform, Arduino core 3.x). A port from the ESP32-C3/GC9A01 build is in progress: see `docs/qualia-port-plan.md` for the phased plan and progress. The repo has no unit tests or linter. CI (`.github/workflows/build.yml`) only checks that the firmware builds.
 
 ```bash
-pio run -e supermini                 # build
-pio run -e supermini -t upload       # flash over USB-C
+pio run -e qualia                    # build; also writes .pio/build/qualia/firmware.factory.bin (flash at 0x0)
+pio run -e qualia -t upload          # flash over USB-C
 pio device monitor                   # serial log at 115200 baud
-pio run -e supermini -t merge        # single web-flashable image -> .pio/build/supermini/firmware-merged.bin (flash at 0x0)
-./scripts/merge-firmware.sh [--no-build]   # same, copied to release/plane-radar-merged.bin
+./scripts/merge-firmware.sh [--no-build]   # copies firmware.factory.bin to release/plane-radar-merged.bin
 python3 scripts/build_large_airports.py    # regenerate the runway dataset from OurAirports
 ```
 
-The `merge` target is defined in `scripts/merge_firmware.py` (a PlatformIO `extra_scripts` post-script). Pushing a `v*` tag runs `release.yml`, which attaches `plane-radar-<tag>.bin` and its `.sha256` to a GitHub Release.
+pioarduino builds the merged `firmware.factory.bin` itself (bootloader, partitions, boot_app0, the board's TinyUF2 image and the app). Pushing a `v*` tag runs `release.yml`, which attaches `plane-radar-<tag>.bin` and its `.sha256` to a GitHub Release.
 
 ## Architecture
 
@@ -43,7 +42,7 @@ Preferences live in separate namespaces: `planeradar` (range preset, miles, runw
 
 ### Flash layout
 
-`partitions/plane_radar.csv` has a single 3 MB app partition with no OTA slot, because the embedded runway dataset is large. Keep that in mind if you add OTA or large assets.
+`partitions/plane_radar.csv` (16 MB) has two 4 MB OTA app slots on either side of the board's TinyUF2 factory slot at 0x410000. The board config always flashes TinyUF2 there, so don't move that slot.
 
 ## Conventions
 

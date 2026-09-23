@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build Plane Radar and produce a single .bin for browser-based flashers (esptool-js, etc.).
+# Build Plane Radar and copy the single .bin for browser-based flashers (esptool-js, etc.).
+# pioarduino writes firmware.factory.bin (bootloader + partitions + boot_app0 + TinyUF2 + app) on every build.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV="${PIOENV:-supermini}"
+ENV="${PIOENV:-qualia}"
 NO_BUILD=0
 OUT="${ROOT}/release/plane-radar-merged.bin"
 
@@ -11,8 +12,8 @@ usage() {
   cat <<'EOF'
 Usage: scripts/merge-firmware.sh [options]
 
-  --no-build     Skip pio run (merge only; firmware must already be built)
-  --env NAME     PlatformIO env (default: supermini)
+  --no-build     Skip pio run (copy only; firmware must already be built)
+  --env NAME     PlatformIO env (default: qualia)
   -o PATH        Output file (default: release/plane-radar-merged.bin)
   -h, --help     Show this help
 EOF
@@ -28,24 +29,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if command -v pio >/dev/null 2>&1; then
-  PIO=pio
-elif [[ -x "${HOME}/.platformio/penv/bin/pio" ]]; then
-  PIO="${HOME}/.platformio/penv/bin/pio"
-else
-  echo "PlatformIO (pio) not found in PATH" >&2
-  exit 1
-fi
-
 cd "$ROOT"
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
+  if command -v pio >/dev/null 2>&1; then
+    PIO=pio
+  elif [[ -x "${HOME}/.platformio/penv/bin/pio" ]]; then
+    PIO="${HOME}/.platformio/penv/bin/pio"
+  elif [[ -x "${HOME}/.platformio/penv/Scripts/pio.exe" ]]; then
+    PIO="${HOME}/.platformio/penv/Scripts/pio.exe"
+  else
+    echo "PlatformIO (pio) not found in PATH" >&2
+    exit 1
+  fi
   "$PIO" run -e "$ENV"
 fi
 
-"$PIO" run -t merge -e "$ENV"
-
-MERGED="${ROOT}/.pio/build/${ENV}/firmware-merged.bin"
+MERGED="${ROOT}/.pio/build/${ENV}/firmware.factory.bin"
 if [[ ! -f "$MERGED" ]]; then
   echo "Expected merged image not found: $MERGED" >&2
   exit 1
@@ -54,4 +54,4 @@ fi
 mkdir -p "$(dirname "$OUT")"
 cp "$MERGED" "$OUT"
 echo "Wrote ${OUT}"
-echo "Flash at offset 0x0 with chip ESP32-C3, 4MB flash (Web Serial flasher)."
+echo "Flash at offset 0x0 with chip ESP32-S3, 16MB flash (Web Serial flasher)."

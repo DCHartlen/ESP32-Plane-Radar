@@ -47,7 +47,7 @@ int performGetWithPoll(HTTPClient& http) {
 }
 
 bool readResponseBodyWithPoll(HTTPClient& http, String& payload) {
-  WiFiClient* stream = http.getStreamPtr();
+  NetworkClient* stream = http.getStreamPtr();
   if (stream == nullptr) {
     return false;
   }

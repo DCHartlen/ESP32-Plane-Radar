@@ -67,6 +67,10 @@ void setup() {
   delay(500);
   Serial.println();
   Serial.println("Plane Radar");
+  Serial.printf("Flash %u MB, PSRAM %u KB (free %u KB)\n",
+                static_cast<unsigned>(ESP.getFlashChipSize() / (1024 * 1024)),
+                static_cast<unsigned>(ESP.getPsramSize() / 1024),
+                static_cast<unsigned>(ESP.getFreePsram() / 1024));
 
   bootButtonInit();
   displayInit();
