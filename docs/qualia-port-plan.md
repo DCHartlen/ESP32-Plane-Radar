@@ -211,7 +211,7 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 | Phase | Status | Notes |
 |---|---|---|
 | 1 Build system | Done (build); hardware check pending | Builds on pioarduino 55.03.312-1 (core 3.3.12, IDF 5.5.5): 1.42 MB app, 28% RAM. The boot log prints flash and PSRAM size. Flash it and confirm about 8 MB PSRAM. |
-| 2 Display | Not started | |
+| 2 Display | Done (build); hardware check pending | `panel`, `display` (PSRAM `canvas`) and the `qualia_panel_test` env build. Starting values: pclk 12 MHz, 7200 px bounce buffer, rotation 0 (`kDisplayRotate180` flips the canvas). BOOT/GPIO0 handling is stubbed out until Phase 3. The radar still uses the 240 px layout (top-left of the screen) until Phase 4. Test: `pio run -e qualia_panel_test -t upload`, then check the five items above against the serial log. |
 | 3 Buttons | Not started | |
 | 4 Relative geometry | Not started | |
 | 5 Fonts | Not started | |

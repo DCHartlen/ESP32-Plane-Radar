@@ -28,7 +28,7 @@ bool vlwActiveOn(const lgfx::LGFXBase& gfx) {
 
 bool displayFontInit() {
   s_vlw_loaded = vlwDataLen() > 0 &&
-                 tft.loadFont(vlwData(), lgfx::IFont::font_type_t::ft_vlw);
+                 canvas.loadFont(vlwData(), lgfx::IFont::font_type_t::ft_vlw);
   if (!s_vlw_loaded) {
     Serial.println("Smooth font load failed — using bitmap fallback");
   }

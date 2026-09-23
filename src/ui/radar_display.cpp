@@ -49,9 +49,7 @@ bool s_tag_use_vlw = false;
 int s_scale_label_max_w = 0;
 int s_scale_label_h = 0;
 
-lgfx::LovyanGFX* s_draw = &tft;
-LGFX_Sprite s_frame(&tft);
-bool s_frame_ready = false;
+lgfx::LovyanGFX* s_draw = &canvas;
 
 class DrawScope {
  public:
@@ -65,14 +63,14 @@ class DrawScope {
 int absDiff(int a, int b) { return std::abs(a - b); }
 
 int measureGfxHeight(const lgfx::GFXfont& font) {
-  tft.setFont(&font);
-  tft.setTextSize(1);
-  return tft.fontHeight();
+  canvas.setFont(&font);
+  canvas.setTextSize(1);
+  return canvas.fontHeight();
 }
 
 int measureVlwHeight(float size) {
-  tft.setTextSize(size);
-  return tft.fontHeight();
+  canvas.setTextSize(size);
+  return canvas.fontHeight();
 }
 
 float findVlwSizeForHeight(int target_px) {
@@ -136,14 +134,14 @@ void initLabelMetrics() {
   }
 
   applyScaleStyle();
-  s_scale_label_h = tft.fontHeight();
+  s_scale_label_h = canvas.fontHeight();
   s_scale_label_max_w = 0;
   char label[12];
   for (size_t i = 0; i < radar::kRangePresetCount; ++i) {
     for (bool miles : {false, true}) {
       radar::formatRing3Label(label, sizeof(label), radar::kRangePresets[i].ring3_km,
                               miles);
-      const int w = tft.textWidth(label);
+      const int w = canvas.textWidth(label);
       if (w > s_scale_label_max_w) {
         s_scale_label_max_w = w;
       }
@@ -173,27 +171,21 @@ void initTagLabelMetrics() {
 }
 
 void initPalette() {
-  radar::kColorBackground = tft.color565(radar::kBgR, radar::kBgG, radar::kBgB);
-  radar::kColorGrid = tft.color565(radar::kGridR, radar::kGridG, radar::kGridB);
-  radar::kColorLabel = tft.color565(255, 255, 255);
-  radar::kColorCenter = tft.color565(255, 255, 255);
-  // GC9A01 BGR panel: swap R/B in color565 so logical red renders red on screen.
-  if (config::kDisplayRgbOrder) {
-    radar::kColorAircraft =
-        tft.color565(radar::kAircraftB, radar::kAircraftG, radar::kAircraftR);
-  } else {
-    radar::kColorAircraft =
-        tft.color565(radar::kAircraftR, radar::kAircraftG, radar::kAircraftB);
-  }
+  radar::kColorBackground = canvas.color565(radar::kBgR, radar::kBgG, radar::kBgB);
+  radar::kColorGrid = canvas.color565(radar::kGridR, radar::kGridG, radar::kGridB);
+  radar::kColorLabel = canvas.color565(255, 255, 255);
+  radar::kColorCenter = canvas.color565(255, 255, 255);
+  radar::kColorAircraft =
+      canvas.color565(radar::kAircraftR, radar::kAircraftG, radar::kAircraftB);
   radar::kColorTrackVector =
-      tft.color565(radar::kTrackR, radar::kTrackG, radar::kTrackB);
+      canvas.color565(radar::kTrackR, radar::kTrackG, radar::kTrackB);
   radar::kColorTagType =
-      tft.color565(radar::kTagTypeR, radar::kTagTypeG, radar::kTagTypeB);
+      canvas.color565(radar::kTagTypeR, radar::kTagTypeG, radar::kTagTypeB);
   radar::kColorTagAltitude =
-      tft.color565(radar::kTagAltR, radar::kTagAltG, radar::kTagAltB);
+      canvas.color565(radar::kTagAltR, radar::kTagAltG, radar::kTagAltB);
   radar::kColorRunway =
-      tft.color565(radar::kRunwayR, radar::kRunwayG, radar::kRunwayB);
-  radar::kColorRunwayLabel = tft.color565(radar::kRunwayLabelR, radar::kRunwayLabelG,
+      canvas.color565(radar::kRunwayR, radar::kRunwayG, radar::kRunwayB);
+  radar::kColorRunwayLabel = canvas.color565(radar::kRunwayLabelR, radar::kRunwayLabelG,
                                           radar::kRunwayLabelB);
 }
 
@@ -659,30 +651,16 @@ void drawStaticGrid(Gfx& gfx) {
   gfx.setTextDatum(textdatum_t::top_left);
 }
 
-bool ensureFrameSprite() {
-  if (s_frame_ready) {
-    return true;
-  }
-  s_frame.setColorDepth(16);
-  if (!s_frame.createSprite(radar::kSize, radar::kSize)) {
-    Serial.println("radar: frame sprite alloc failed");
-    return false;
-  }
-  s_frame_ready = true;
-  return true;
-}
-
-// Double-buffered frame: composite the grid AND aircraft into the off-screen
-// sprite, then blit it to the panel in a single pushSprite. Because the panel
-// is updated in one pass, labels never show an erase/redraw gap — no flicker.
+// Composite the grid and aircraft into the off-screen canvas, then copy it to
+// the panel in one pass, so labels never show an erase/redraw gap.
 void renderFrame() {
-  drawStaticGrid(s_frame);  // opens its own DrawScope(s_frame)
+  drawStaticGrid(canvas);  // opens its own DrawScope(canvas)
   {
-    const DrawScope scope(s_frame);
+    const DrawScope scope(canvas);
     drawAircraft();
   }
-  s_frame.pushSprite(0, 0);
-  tft.setTextDatum(textdatum_t::top_left);
+  canvas.setTextDatum(textdatum_t::top_left);
+  displayPresent();
 }
 
 }  // namespace
@@ -690,28 +668,12 @@ void renderFrame() {
 void radarDisplayDraw() {
   initPalette();
   initLabelMetrics();
-
-  if (ensureFrameSprite()) {
-    renderFrame();
-    return;
-  }
-
-  // Fallback when the sprite can't be allocated: draw straight to the panel.
-  const DrawScope scope(tft);
-  drawStaticGrid(tft);
-  drawAircraft();
-  tft.setTextDatum(textdatum_t::top_left);
+  renderFrame();
 }
 
 void radarDisplayRefreshAircraft() {
   initPalette();
-
-  if (ensureFrameSprite()) {
-    renderFrame();
-    return;
-  }
-
-  radarDisplayDraw();
+  renderFrame();
 }
 
 }  // namespace ui

@@ -2,10 +2,12 @@
 
 #include <lgfx/v1/lgfx_fonts.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
+#include <iterator>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -51,27 +53,27 @@ struct TextLine {
 };
 
 int lineHeightGfx(const lgfx::GFXfont* font) {
-  displayFontSetBitmap(tft, font);
-  return tft.fontHeight();
+  displayFontSetBitmap(canvas, font);
+  return canvas.fontHeight();
 }
 
 int lineHeightVlw(float size) {
-  displayFontSetSmoothSize(tft, size);
-  return tft.fontHeight();
+  displayFontSetSmoothSize(canvas, size);
+  return canvas.fontHeight();
 }
 
 void applyLineStyle(const TextLine& line) {
   if (displayFontIsSmooth()) {
-    displayFontSetSmoothSize(tft, line.vlw_size);
+    displayFontSetSmoothSize(canvas, line.vlw_size);
   } else {
-    displayFontSetBitmap(tft, line.gfx_font);
+    displayFontSetBitmap(canvas, line.gfx_font);
   }
 }
 
 void drawTextBlock(uint16_t bg, uint16_t fg, const TextLine* lines, size_t count) {
-  tft.fillScreen(bg);
-  tft.setTextColor(fg, bg);
-  tft.setTextDatum(textdatum_t::middle_center);
+  canvas.fillScreen(bg);
+  canvas.setTextColor(fg, bg);
+  canvas.setTextDatum(textdatum_t::middle_center);
 
   int total_h = 0;
   for (size_t i = 0; i < count; ++i) {
@@ -91,18 +93,19 @@ void drawTextBlock(uint16_t bg, uint16_t fg, const TextLine* lines, size_t count
     const int h =
         displayFontIsSmooth() ? lineHeightVlw(lines[i].vlw_size)
                               : lineHeightGfx(lines[i].gfx_font);
-    tft.drawString(lines[i].text, kCenterX, y + h / 2);
+    canvas.drawString(lines[i].text, kCenterX, y + h / 2);
     y += h + kLineGap;
   }
+  displayPresent();
 }
 
 constexpr float kConnectingDetailVlw = 0.92f;
 
 void applyConnectingDetailStyle() {
   if (displayFontIsSmooth()) {
-    displayFontSetSmoothSize(tft, kConnectingDetailVlw);
+    displayFontSetSmoothSize(canvas, kConnectingDetailVlw);
   } else {
-    displayFontSetBitmap(tft, &kConnectingGfxDetail);
+    displayFontSetBitmap(canvas, &kConnectingGfxDetail);
   }
 }
 
@@ -111,14 +114,14 @@ void fitSsidLine() {
   strncpy(s_ssid_line, s_connecting_ssid, sizeof(s_ssid_line) - 1);
   s_ssid_line[sizeof(s_ssid_line) - 1] = '\0';
   applyConnectingDetailStyle();
-  if (tft.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
+  if (canvas.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
     return;
   }
   const size_t len = strlen(s_connecting_ssid);
   for (size_t n = len; n > 0; --n) {
     snprintf(s_ssid_line, sizeof(s_ssid_line), "%.*s…", static_cast<int>(n),
              s_connecting_ssid);
-    if (tft.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
+    if (canvas.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
       return;
     }
   }
@@ -127,25 +130,31 @@ void fitSsidLine() {
 }
 
 void drawConnectingText() {
-  tft.fillScreen(config::kColorBlack);
+  canvas.fillScreen(config::kColorBlack);
 
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setTextColor(config::kTextOnBlack, config::kColorBlack);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  canvas.setTextColor(config::kTextOnBlack, config::kColorBlack);
 
   applyConnectingDetailStyle();
-  const int detail_h = tft.fontHeight();
+  const int detail_h = canvas.fontHeight();
   const int total_h = detail_h * 2 + kLineGap;
   const int block_top = (config::kDisplayHeight - total_h) / 2;
   constexpr int kPanelPadY = 8;
-  tft.fillRect(kCenterX - kConnectingTextMaxWidthPx / 2, block_top - kPanelPadY,
+  canvas.fillRect(kCenterX - kConnectingTextMaxWidthPx / 2, block_top - kPanelPadY,
                kConnectingTextMaxWidthPx, total_h + kPanelPadY * 2, config::kColorBlack);
 
   int y = block_top;
-  tft.drawString("Connecting to", kCenterX, y + detail_h / 2);
+  canvas.drawString("Connecting to", kCenterX, y + detail_h / 2);
   y += detail_h + kLineGap;
-  tft.drawString(s_ssid_line, kCenterX, y + detail_h / 2);
+  canvas.drawString(s_ssid_line, kCenterX, y + detail_h / 2);
 
   s_connecting_text_drawn = true;
+}
+
+/** Push just the area a spinner dot (or its erase disc) covers. */
+void presentSpinnerDot(const SpinnerDot& dot) {
+  displayPresentRect(dot.x - kSpinnerEraseRadius, dot.y - kSpinnerEraseRadius,
+                     kSpinnerEraseRadius * 2 + 1, kSpinnerEraseRadius * 2 + 1);
 }
 
 void eraseSpinnerDots() {
@@ -153,7 +162,7 @@ void eraseSpinnerDots() {
     if (!s_spinner_dots[i].drawn) {
       continue;
     }
-    tft.fillCircle(s_spinner_dots[i].x, s_spinner_dots[i].y, kSpinnerEraseRadius,
+    canvas.fillCircle(s_spinner_dots[i].x, s_spinner_dots[i].y, kSpinnerEraseRadius,
                    config::kColorBlack);
     s_spinner_dots[i].drawn = false;
   }
@@ -169,8 +178,8 @@ void drawSpinnerDots() {
     const int y = kCenterY + static_cast<int>(std::lround(std::sin(a) * kSpinnerRadius));
 
     const int fade = 255 - i * 22;
-    const uint16_t color = tft.color565(0, fade, 0);
-    tft.fillSmoothCircle(x, y, kSpinnerDotRadius, color);
+    const uint16_t color = canvas.color565(0, fade, 0);
+    canvas.fillSmoothCircle(x, y, kSpinnerDotRadius, color);
 
     s_spinner_dots[i].x = x;
     s_spinner_dots[i].y = y;
@@ -192,18 +201,29 @@ void statusScreenConnectingBegin(const char* ssid) {
   s_connecting_text_drawn = false;
   drawConnectingText();
   drawSpinnerDots();
+  displayPresent();
 }
 
 void statusScreenConnectingTick() {
   if (!s_connecting_text_drawn) {
     drawConnectingText();
+    displayPresent();
   }
+  SpinnerDot previous[kSpinnerDotCount];
+  std::copy(std::begin(s_spinner_dots), std::end(s_spinner_dots), previous);
   eraseSpinnerDots();
   s_spinner_angle_deg += kSpinnerStepDeg;
   if (s_spinner_angle_deg >= 270.0f) {
     s_spinner_angle_deg -= 360.0f;
   }
   drawSpinnerDots();
+  // Push old and new dot areas only after both passes, so dots never blink.
+  for (int i = 0; i < kSpinnerDotCount; ++i) {
+    if (previous[i].drawn) {
+      presentSpinnerDot(previous[i]);
+    }
+    presentSpinnerDot(s_spinner_dots[i]);
+  }
 }
 
 void statusScreenPortal() {

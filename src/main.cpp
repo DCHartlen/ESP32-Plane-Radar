@@ -1,5 +1,5 @@
 /**
- * Plane Radar — WiFi setup, then radar UI on the round GC9A01 display.
+ * Plane Radar — WiFi setup, then radar UI on the Qualia's round 720×720 panel.
  */
 
 #include <Arduino.h>
@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "hardware/display.h"
+#include "hardware/panel_test.h"
 #include "services/adsb_client.h"
 #include "services/radar_location.h"
 #include "services/wifi_setup.h"
@@ -74,6 +75,9 @@ void setup() {
 
   bootButtonInit();
   displayInit();
+#ifdef PANEL_TEST
+  panelTestRun();
+#endif
   if (wifiShowsSetupScreenOnBoot()) {
     statusScreenPortal();
   }
