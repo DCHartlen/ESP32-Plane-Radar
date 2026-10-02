@@ -25,22 +25,27 @@ Adafruit Qualia ESP32-S3 + 4" 720×720 NV3052C panel, on pioarduino and core 3.x
 buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 `src/hardware/display.cpp`.
 
-- **16 MHz pclk with Wi-Fi working.** This is the open issue in the port plan (Wi-Fi fails at
-  16 MHz here). They drive the panel with `esp_lcd` directly, not Arduino_GFX:
-  - `num_fbs = 2`
-  - `bounce_buffer_size_px = 720 * 36` (36 lines; the line count must divide 720). Ours is 7200 px
-    (10 lines).
-  - `dma_burst_size = 64`
+- **16 MHz pclk with Wi-Fi working. Done here (2026-10-02):** their 36-line bounce buffer
+  (`bounce_buffer_size_px = 720 * 36`) alone fixed it on our Arduino_GFX path. See the port
+  plan's open issues for measurements. Their other panel settings, compared with ours:
+  - `num_fbs = 2`: needed for the no-copy present below. Arduino_GFX hard-codes 1.
+  - `dma_burst_size = 64`: **already the same.** It shares a union with `psram_trans_align`,
+    which Arduino_GFX sets to 64.
+  - `pclk_active_neg = 0` (ours is 1): not needed for 16 MHz. Only worth trying if fine detail
+    shimmers.
   - `periph_module_reset(PERIPH_LCD_CAM_MODULE)` before init, and `esp_lcd_rgb_panel_restart()`
-    after, so a warm reboot doesn't shift the image vertically
-  - `WiFi.setSleep(WIFI_PS_NONE)` and `WiFi.setTxPower(WIFI_POWER_8_5dBm)`
-
-  Which of these makes 16 MHz work isn't known. Try the bigger bounce buffer first (cheapest).
+    after, so a warm reboot doesn't shift the image vertically. Bring over with the rewrite.
+  - `WiFi.setSleep(WIFI_PS_NONE)`: we already do this. `WiFi.setTxPower(WIFI_POWER_8_5dBm)` isn't
+    theirs: it's an upstream ESP32-C3 fix (WatskeBart, `2e2808e`) merged into their fork, and it
+    crippled our setup AP in Phase 2. Don't bring it over.
 - **No-copy present.** LovyanGFX draws straight into the panel's back framebuffer
-  (`tft.setBuffer(qualiaRgbBackBuffer(), ...)`), and presenting calls `esp_lcd_panel_draw_bitmap`
-  with the driver's own buffer, which swaps on VSYNC without copying. Then `setBuffer` points at the
-  new back buffer. This removes our ~100 ms present. It works because we already redraw the full
-  frame every time.
+  (`tft.setBuffer(qualiaRgbBackBuffer(), ...)`, color depth `rgb565_nonswapped`), and presenting
+  calls `esp_lcd_panel_draw_bitmap` with the driver's own buffer, which switches buffers instead
+  of copying. Then `setBuffer` points at the new back buffer. This removes our ~110 ms present.
+  It works because we already redraw the full frame every time. Their comment says
+  `draw_bitmap` blocks until the swap; Espressif's anti-tearing example instead waits on a
+  semaphore from the `on_frame_buf_complete` callback, so add that wait and check for tearing on
+  hardware.
 - **Smooth motion.** Between fetches each aircraft is dead-reckoned along `track_deg` at
   `gs_knots`, seeded with the ADS-B `seen_pos` age, and the radar redraws at 4 Hz
   (`kRadarRedrawIntervalMs = 250`). The fetch runs on a background FreeRTOS task. Commits
@@ -71,17 +76,26 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 
 ## Current frame budget
 
-From Phase 6 on hardware: draw ~107 ms with no aircraft, plus ~4 ms per aircraft (~185 ms with
-19), then present ~100 ms. That's ~285 ms per frame, ~3.5 fps. Smooth motion at 4 Hz needs under
-250 ms, and a sweep needs more. So the display speed-up comes first.
+At 16 MHz pclk (2026-10-02): draw ~140 ms with no aircraft, plus ~5.5 ms per aircraft (~245 ms
+with 20), then present ~110 ms. That's ~380 ms per frame with 25 aircraft, ~2.6 fps. At 12 MHz
+(Phase 6) it was draw ~107 ms + ~4 ms per aircraft, present ~100 ms. The canvas is in PSRAM,
+and the faster scan-out leaves less PSRAM bandwidth for drawing.
+
+Smooth motion at 4 Hz needs under 250 ms, and a sweep needs more. The no-copy present removes
+the ~110 ms present, but drawing alone is over 250 ms with 20+ aircraft. Getting there also
+needs cheaper drawing (for example, caching the static grid and runways and copying them in
+each frame) or a lower redraw rate.
 
 ## Roadmap
 
-1. **Faster display output** (pvanbaren). Own the RGB panel through `esp_lcd` in `panel.cpp`
-   (Arduino_GFX keeps only the NV3052C init sequence, which the port plan already lists as a
-   fallback), draw into the back framebuffer, and present by swapping. Then retry 16 MHz with the
-   36-line bounce buffer and Wi-Fi power saving off. Check: present time, Wi-Fi at 16 MHz, setup AP
-   at 16 MHz, warm reboot alignment.
+1. **Faster display output** (pvanbaren). 16 MHz with the 36-line bounce buffer is done. Next:
+   own the RGB panel through `esp_lcd` in `panel.cpp`. Arduino_GFX keeps the expander and the
+   NV3052C init sequence (`batchOperation(hd40015c40_init_operations)`). Draw into the back
+   framebuffer, present by swapping after a VSYNC wait, and add the LCD_CAM reset and restart.
+   The connecting spinner and the panel test redraw the full frame instead of pushing rects.
+   Check: present time, tearing, spinner, Wi-Fi and setup AP, warm reboot alignment. No build
+   changes needed: the current framework has all the esp_lcd calls. Then cheaper drawing (see
+   "Current frame budget").
 2. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task, dead-reckon between
    fetches with `seen_pos`, redraw at 4 Hz.
 3. **Label decluttering** (blinkidy). Closes the tag-overlap item in the port plan.

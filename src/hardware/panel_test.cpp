@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 #include <cstdio>
 
@@ -157,6 +158,11 @@ void fetchOnce() {
   // Full-frame push under Wi-Fi load: watch for tearing or jitter here.
   displayPresent();
   Serial.printf("panel test: full present %lu ms\n", millis() - t1);
+  // The bounce buffers live in internal RAM; HTTPS needs headroom there too.
+  Serial.printf("panel test: internal heap %u KB free, %u KB min, %u KB largest\n",
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
   drawStatusLine();
 }
 
