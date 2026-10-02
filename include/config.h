@@ -40,6 +40,8 @@ constexpr uint8_t kExpanderPinBacklight = 4;
 constexpr uint8_t kExpanderPinButtonUp = 5;
 constexpr uint8_t kExpanderPinButtonDown = 6;
 constexpr uint8_t kExpanderPinTftMosi = 7;
+/** Measured on hardware: UP/DOWN read 1 when released, 0 when pressed. */
+constexpr bool kButtonActiveLow = true;
 
 // --- Display: 4" round 720x720 NV3052C (HD40015C40), RGB-666 wired as RGB565 ---
 constexpr int kDisplayWidth = 720;
@@ -63,7 +65,12 @@ constexpr uint16_t kPanelVsyncPulseWidth = 16;
 constexpr uint16_t kPanelVsyncBackPorch = 16;
 constexpr uint16_t kPanelPclkActiveNeg = 1;
 
-/** Examples use 6 MHz; aim for 12-16 MHz with bounce buffers. Lower it if the image jitters. */
+/**
+ * Refresh = pclk / (812 * 802): 12 MHz ~18 Hz (dark shades flicker on hardware),
+ * 16 MHz ~25 Hz, 20 MHz ~31 Hz. Lower it if the image jitters or drifts under Wi-Fi load.
+ */
+// Measured: 12 MHz = STA + HTTPS clean. 16 MHz = Wi-Fi can't connect (STA or AP).
+// The setup AP at 12 MHz is still unverified (8 MHz works).
 constexpr int32_t kPanelPclkHz = 12000000;
 /** SRAM bounce buffer (pixels, must divide 720*720); 0 = scan straight from PSRAM. */
 constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 10;

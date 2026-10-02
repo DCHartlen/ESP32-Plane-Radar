@@ -65,9 +65,13 @@ void fetchAndDrawAircraft() {
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  // USB CDC re-enumerates on every reset; give the monitor up to 3 s to reattach.
+  while (!Serial && millis() < 3000) {
+    delay(10);
+  }
   Serial.println();
   Serial.println("Plane Radar");
+  Serial.printf("Reset reason: %d\n", static_cast<int>(esp_reset_reason()));
   Serial.printf("Flash %u MB, PSRAM %u KB (free %u KB)\n",
                 static_cast<unsigned>(ESP.getFlashChipSize() / (1024 * 1024)),
                 static_cast<unsigned>(ESP.getPsramSize() / 1024),
