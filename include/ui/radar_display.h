@@ -2,10 +2,10 @@
 
 namespace ui {
 
-/** Draw the static sonar/radar grid (black disc, green overlay, labels). */
+/** Render the full frame (grid, runways, labels, aircraft) into `canvas` and present it. */
 void radarDisplayDraw();
 
-/** Redraw aircraft only (blits cached grid; no full-screen clear). */
+/** Called after a fetch with new aircraft. Same as radarDisplayDraw(): every frame is full. */
 void radarDisplayRefreshAircraft();
 
 }  // namespace ui

@@ -1,5 +1,7 @@
 #include "ui/radar_display.h"
 
+#include <Arduino.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -38,17 +40,6 @@ using radar::offsetKmFromCenter;
 /** Scale label is a little shorter than the cardinal letters. */
 constexpr int kScaleLabelHeightPx =
     radar::kCardinalLabelHeightPx - radar::kScaleBelowCardinalPx;
-
-lgfx::LovyanGFX* s_draw = &canvas;
-
-class DrawScope {
- public:
-  explicit DrawScope(lgfx::LovyanGFX& gfx) : prev_(s_draw) { s_draw = &gfx; }
-  ~DrawScope() { s_draw = prev_; }
-
- private:
-  lgfx::LovyanGFX* prev_;
-};
 
 void initPalette() {
   radar::kColorBackground = canvas.color565(radar::kBgR, radar::kBgG, radar::kBgB);
@@ -109,8 +100,8 @@ bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
 }
 
 void drawBeyondRingDot(int x, int y) {
-  s_draw->fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx,
-                           radar::kColorAircraft);
+  canvas.fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx,
+                         radar::kColorAircraft);
 }
 
 /** Screen length of the distance flown in kAircraftTrackHorizonSec at the current range. */
@@ -149,8 +140,8 @@ void drawHeadingTriangle(int cx, int cy, float heading_deg, uint16_t color) {
   const int wing_x = static_cast<int>(lroundf(cos_h * radar::kAircraftTailHalfPx));
   const int wing_y = static_cast<int>(lroundf(sin_h * radar::kAircraftTailHalfPx));
 
-  s_draw->fillTriangle(tip_x, tip_y, base_x + wing_x, base_y + wing_y,
-                       base_x - wing_x, base_y - wing_y, color);
+  canvas.fillTriangle(tip_x, tip_y, base_x + wing_x, base_y + wing_y,
+                     base_x - wing_x, base_y - wing_y, color);
 }
 
 /** Drawn before the symbol, so the part under the triangle is hidden. */
@@ -168,30 +159,30 @@ void drawSpeedVector(int cx, int cy, float track_deg, float gs_knots, uint16_t c
   if (ex == cx && ey == cy) {
     return;
   }
-  s_draw->drawWideLine(cx, cy, ex, ey, radar::kAircraftTrackLineHalfWidth, color);
+  canvas.drawWideLine(cx, cy, ex, ey, radar::kAircraftTrackLineHalfWidth, color);
 }
 
 void applyTagStyle() {
-  displayFontApply(*s_draw, radar::kAircraftTagLabelHeightPx);
+  displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
 }
 
 int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
   applyTagStyle();
   int max_w = 0;
   if (plane.callsign[0] != '\0') {
-    const int w = s_draw->textWidth(plane.callsign);
+    const int w = canvas.textWidth(plane.callsign);
     if (w > max_w) {
       max_w = w;
     }
   }
   if (plane.type[0] != '\0') {
-    const int w = s_draw->textWidth(plane.type);
+    const int w = canvas.textWidth(plane.type);
     if (w > max_w) {
       max_w = w;
     }
   }
   if (plane.alt[0] != '\0') {
-    const int w = s_draw->textWidth(plane.alt);
+    const int w = canvas.textWidth(plane.alt);
     if (w > max_w) {
       max_w = w;
     }
@@ -202,7 +193,7 @@ int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
 void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   applyTagStyle();
 
-  const int line_h = s_draw->fontHeight();
+  const int line_h = canvas.fontHeight();
   const int block_w = measureTagBlockWidth(plane);
   const int block_h = line_h * 3;
   int ly = y - block_h / 2;
@@ -216,29 +207,29 @@ void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   if (tag_on_right) {
     anchor_x = x + symbol_half + radar::kAircraftLabelGapPx;
     anchor_x = std::min(anchor_x, radar::kSize - block_w - edge_pad);
-    s_draw->setTextDatum(textdatum_t::top_left);
+    canvas.setTextDatum(textdatum_t::top_left);
   } else {
     anchor_x = x - symbol_half - radar::kAircraftLabelGapPx;
     anchor_x = std::max(anchor_x, block_w + edge_pad);
-    s_draw->setTextDatum(textdatum_t::top_right);
+    canvas.setTextDatum(textdatum_t::top_right);
   }
   ly = std::max(edge_pad, std::min(ly, radar::kSize - block_h - edge_pad));
 
   if (plane.callsign[0] != '\0') {
-    s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
-    s_draw->drawString(plane.callsign, anchor_x, ly);
+    canvas.setTextColor(radar::kColorLabel, radar::kColorBackground);
+    canvas.drawString(plane.callsign, anchor_x, ly);
   }
   ly += line_h;
 
   if (plane.type[0] != '\0') {
-    s_draw->setTextColor(radar::kColorTagType, radar::kColorBackground);
-    s_draw->drawString(plane.type, anchor_x, ly);
+    canvas.setTextColor(radar::kColorTagType, radar::kColorBackground);
+    canvas.drawString(plane.type, anchor_x, ly);
   }
   ly += line_h;
 
   if (plane.alt[0] != '\0') {
-    s_draw->setTextColor(radar::kColorTagAltitude, radar::kColorBackground);
-    s_draw->drawString(plane.alt, anchor_x, ly);
+    canvas.setTextColor(radar::kColorTagAltitude, radar::kColorBackground);
+    canvas.drawString(plane.alt, anchor_x, ly);
   }
 }
 
@@ -340,34 +331,34 @@ void drawAircraft() {
 }
 
 void applyCardinalStyle() {
-  displayFontApply(*s_draw, radar::kCardinalLabelHeightPx);
+  displayFontApply(canvas, radar::kCardinalLabelHeightPx);
 }
 
-void applyScaleStyle() { displayFontApply(*s_draw, kScaleLabelHeightPx); }
+void applyScaleStyle() { displayFontApply(canvas, kScaleLabelHeightPx); }
 
 void drawCardinalLabel(const char* text, int x, int y, textdatum_t datum) {
   applyCardinalStyle();
-  s_draw->setTextDatum(datum);
-  s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
-  s_draw->drawString(text, x, y);
+  canvas.setTextDatum(datum);
+  canvas.setTextColor(radar::kColorLabel, radar::kColorBackground);
+  canvas.drawString(text, x, y);
 }
 
 void drawScaleLabelWithBackground(const char* text, int x, int y) {
   applyScaleStyle();
-  s_draw->setTextDatum(textdatum_t::middle_right);
+  canvas.setTextDatum(textdatum_t::middle_right);
 
-  const int tw = s_draw->textWidth(text);
-  const int th = s_draw->fontHeight();
+  const int tw = canvas.textWidth(text);
+  const int th = canvas.fontHeight();
   constexpr int kPadX = px(3);
   constexpr int kPadY = px(2);
 
   const int left = x - tw - kPadX;
   const int top = y - th / 2 - kPadY;
 
-  s_draw->fillRect(left, top, tw + kPadX * 2, th + kPadY * 2,
-                   radar::kColorBackground);
-  s_draw->setTextColor(radar::kColorGrid, radar::kColorBackground);
-  s_draw->drawString(text, x, y);
+  canvas.fillRect(left, top, tw + kPadX * 2, th + kPadY * 2,
+                 radar::kColorBackground);
+  canvas.setTextColor(radar::kColorGrid, radar::kColorBackground);
+  canvas.drawString(text, x, y);
 }
 
 void drawGridRing(int cx, int cy, int r, uint16_t color) {
@@ -377,7 +368,7 @@ void drawGridRing(int cx, int cy, int r, uint16_t color) {
   // One filled annulus: stacked 1 px circles leave pinholes once the stroke is thick.
   const int thickness =
       std::max(1, static_cast<int>(lroundf(radar::kGridStrokeHalfWidth * 2.0f)));
-  s_draw->fillArc(cx, cy, std::max(0, r - thickness + 1), r, 0.0f, 360.0f, color);
+  canvas.fillArc(cx, cy, std::max(0, r - thickness + 1), r, 0.0f, 360.0f, color);
 }
 
 void drawRings(int cx, int cy, int outer_radius) {
@@ -388,14 +379,14 @@ void drawRings(int cx, int cy, int outer_radius) {
 }
 
 void drawCrosshairs(int cx, int cy, int radius, uint16_t color) {
-  s_draw->drawWideLine(cx, cy - radius, cx, cy + radius,
-                       radar::kGridStrokeHalfWidth, color);
-  s_draw->drawWideLine(cx - radius, cy, cx + radius, cy,
-                       radar::kGridStrokeHalfWidth, color);
+  canvas.drawWideLine(cx, cy - radius, cx, cy + radius,
+                      radar::kGridStrokeHalfWidth, color);
+  canvas.drawWideLine(cx - radius, cy, cx + radius, cy,
+                      radar::kGridStrokeHalfWidth, color);
 }
 
 void drawCenterDot(int cx, int cy) {
-  s_draw->fillSmoothCircle(cx, cy, radar::kCenterDotRadius, radar::kColorCenter);
+  canvas.fillSmoothCircle(cx, cy, radar::kCenterDotRadius, radar::kColorCenter);
 }
 
 void drawCardinalLabels() {
@@ -421,46 +412,128 @@ void drawScaleLabel(int cx, int cy, int outer_radius) {
                                scaleLabelAnchorX(cx, outer_radius), cy);
 }
 
-template <typename Gfx>
-void drawStaticGrid(Gfx& gfx) {
-  const DrawScope scope(gfx);
+/** Headline and detail for the empty radar, from how the last fetch went. */
+void describeFetchProblem(char* headline, size_t headline_len, char* detail, size_t detail_len) {
+  using services::adsb::FetchStatus;
+  const int code = services::adsb::lastErrorCode();
+  const char* title = "";
+  detail[0] = '\0';
+  switch (services::adsb::lastStatus()) {
+    case FetchStatus::Pending:
+      title = "Waiting for data";
+      break;
+    case FetchStatus::Ok:  // last fetch was good, but too long ago
+      title = "Data out of date";
+      break;
+    case FetchStatus::NoConnection:
+      title = "No internet";
+      snprintf(detail, detail_len, "Can't reach adsb.fi");
+      break;
+    case FetchStatus::Timeout:
+      title = "adsb.fi not responding";
+      snprintf(detail, detail_len, "Request timed out");
+      break;
+    case FetchStatus::ConnectionLost:
+      title = "Connection lost";
+      if (code != 0) {
+        snprintf(detail, detail_len, "Error %d", code);
+      }
+      break;
+    case FetchStatus::RateLimited:
+      title = "adsb.fi rate limit";
+      snprintf(detail, detail_len, "HTTP %d", code);
+      break;
+    case FetchStatus::ServerError:
+      title = "adsb.fi unavailable";
+      snprintf(detail, detail_len, "HTTP %d", code);
+      break;
+    case FetchStatus::HttpError:
+      title = "adsb.fi error";
+      snprintf(detail, detail_len, "HTTP %d", code);
+      break;
+    case FetchStatus::BadResponse:
+      title = "Bad data from adsb.fi";
+      snprintf(detail, detail_len, "%s", services::adsb::lastErrorDetail());
+      break;
+  }
+  snprintf(headline, headline_len, "%s", title);
+}
+
+/** Shown instead of aircraft when the data is stale, between the first and second rings. */
+void drawFetchProblem() {
+  char headline[32];
+  char detail[40];
+  describeFetchProblem(headline, sizeof(headline), detail, sizeof(detail));
+
+  const int cx = radar::kCenterX;
+  const int cy = radar::kCenterY + radar::kGridOuterRadius * 3 / 8;
+  constexpr int kPadX = px(4);
+  constexpr int kPadY = px(2);
+
+  displayFontApply(canvas, radar::kCardinalLabelHeightPx);
+  const int headline_w = canvas.textWidth(headline);
+  const int headline_h = canvas.fontHeight();
+  int detail_w = 0;
+  int detail_h = 0;
+  if (detail[0] != '\0') {
+    displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
+    detail_w = canvas.textWidth(detail);
+    detail_h = canvas.fontHeight();
+  }
+
+  const int box_w = std::max(headline_w, detail_w) + kPadX * 2;
+  const int box_h = headline_h + detail_h + kPadY * 2;
+  const int top = cy - box_h / 2;
+  canvas.fillRect(cx - box_w / 2, top, box_w, box_h, radar::kColorBackground);
+
+  canvas.setTextDatum(textdatum_t::top_center);
+  displayFontApply(canvas, radar::kCardinalLabelHeightPx);
+  canvas.setTextColor(radar::kColorTagType, radar::kColorBackground);
+  canvas.drawString(headline, cx, top + kPadY);
+  if (detail[0] != '\0') {
+    displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
+    canvas.setTextColor(radar::kColorLabel, radar::kColorBackground);
+    canvas.drawString(detail, cx, top + kPadY + headline_h);
+  }
+}
+
+void drawStaticGrid() {
   const int cx = radar::kCenterX;
   const int cy = radar::kCenterY;
   const int grid_r = radar::kGridOuterRadius;
 
-  gfx.fillScreen(radar::kColorBackground);
+  canvas.fillScreen(radar::kColorBackground);
   drawRings(cx, cy, grid_r);
   drawCrosshairs(cx, cy, grid_r, radar::kColorGrid);
-  initPalette();
-  runway::drawLargeAirportRunways(gfx);
+  runway::drawLargeAirportRunways(canvas);
   drawCenterDot(cx, cy);
   drawCardinalLabels();
   drawScaleLabel(cx, cy, grid_r);
-  gfx.setTextDatum(textdatum_t::top_left);
-}
-
-// Composite the grid and aircraft into the off-screen canvas, then copy it to
-// the panel in one pass, so labels never show an erase/redraw gap.
-void renderFrame() {
-  drawStaticGrid(canvas);  // opens its own DrawScope(canvas)
-  {
-    const DrawScope scope(canvas);
-    drawAircraft();
-  }
-  canvas.setTextDatum(textdatum_t::top_left);
-  displayPresent();
 }
 
 }  // namespace
 
+// Composite the grid and aircraft into the off-screen canvas, then copy it to
+// the panel in one pass, so labels never show an erase/redraw gap.
 void radarDisplayDraw() {
+  const unsigned long t0 = millis();
   initPalette();
-  renderFrame();
+  drawStaticGrid();
+  // Old positions look live, so once the data goes stale show why instead.
+  const bool fresh = services::adsb::aircraftFresh();
+  if (fresh) {
+    drawAircraft();
+  } else {
+    drawFetchProblem();
+  }
+  canvas.setTextDatum(textdatum_t::top_left);
+  const unsigned long t1 = millis();
+  displayPresent();
+  Serial.printf("Radar frame: draw %lu ms, present %lu ms, %u aircraft%s\n", t1 - t0,
+                millis() - t1, static_cast<unsigned>(services::adsb::aircraftCount()),
+                fresh ? "" : " (stale, hidden)");
 }
 
-void radarDisplayRefreshAircraft() {
-  initPalette();
-  renderFrame();
-}
+void radarDisplayRefreshAircraft() { radarDisplayDraw(); }
 
 }  // namespace ui

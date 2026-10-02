@@ -92,6 +92,8 @@ constexpr double kDefaultRadarLon = 4.9041;
 
 /** Poll adsb.fi (API public limit: 1 req/s). */
 constexpr unsigned long kAdsbFetchIntervalMs = 5000;
+/** Hide aircraft (and show the fetch error) when the last good fetch is older than this. */
+constexpr unsigned long kAdsbStaleAfterMs = 30000;
 /** Legacy scale unused — fetch uses radar::fetchRadiusKm() to screen edge. */
 constexpr float kAdsbFetchRadiusScale = 1.0f;
 /** false = hide aircraft with alt_baro "ground"; true = show them too. */

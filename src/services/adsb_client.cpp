@@ -5,6 +5,7 @@
 
 #include <ArduinoJson.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "config.h"
@@ -22,6 +23,37 @@ Aircraft s_aircraft[kMaxAircraft];
 size_t s_aircraft_count = 0;
 PollFn s_poll_fn = nullptr;
 
+FetchStatus s_status = FetchStatus::Pending;
+int s_error_code = 0;
+char s_error_detail[32] = "";
+unsigned long s_last_ok_ms = 0;  // 0 = no good fetch since boot or invalidate()
+
+void setFailure(FetchStatus status, int code, const char* detail = "") {
+  s_status = status;
+  s_error_code = code;
+  strncpy(s_error_detail, detail, sizeof(s_error_detail) - 1);
+  s_error_detail[sizeof(s_error_detail) - 1] = '\0';
+}
+
+FetchStatus statusForHttpCode(int code) {
+  if (code == HTTPC_ERROR_CONNECTION_REFUSED || code == HTTPC_ERROR_NOT_CONNECTED) {
+    return FetchStatus::NoConnection;
+  }
+  if (code == HTTPC_ERROR_READ_TIMEOUT) {
+    return FetchStatus::Timeout;
+  }
+  if (code < 0) {
+    return FetchStatus::ConnectionLost;
+  }
+  if (code == 429) {
+    return FetchStatus::RateLimited;
+  }
+  if (code >= 500) {
+    return FetchStatus::ServerError;
+  }
+  return FetchStatus::HttpError;
+}
+
 void pollNetwork() {
   if (s_poll_fn != nullptr) {
     s_poll_fn();
@@ -31,9 +63,10 @@ void pollNetwork() {
 int performGetWithPoll(HTTPClient& http) {
   http.setConnectTimeout(kConnectAttemptMs);
   const unsigned long deadline = millis() + kRequestTimeoutMs;
+  int code = HTTPC_ERROR_READ_TIMEOUT;
   while (millis() < deadline) {
     pollNetwork();
-    const int code = http.GET();
+    code = http.GET();
     if (code > 0) {
       return code;
     }
@@ -43,7 +76,8 @@ int performGetWithPoll(HTTPClient& http) {
     }
     delay(5);
   }
-  return HTTPC_ERROR_READ_TIMEOUT;
+  // Still unable to connect at the deadline: report that, not a read timeout.
+  return code;
 }
 
 bool readResponseBodyWithPoll(HTTPClient& http, String& payload) {
@@ -205,6 +239,22 @@ size_t aircraftCount() { return s_aircraft_count; }
 
 const Aircraft* aircraftList() { return s_aircraft; }
 
+FetchStatus lastStatus() { return s_status; }
+
+int lastErrorCode() { return s_error_code; }
+
+const char* lastErrorDetail() { return s_error_detail; }
+
+bool aircraftFresh() {
+  return s_last_ok_ms != 0 && millis() - s_last_ok_ms <= config::kAdsbStaleAfterMs;
+}
+
+void invalidate() {
+  s_aircraft_count = 0;
+  s_last_ok_ms = 0;
+  setFailure(FetchStatus::Pending, 0);
+}
+
 bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   const float dist_nm = kmToNauticalMiles(fetch_radius_km);
 
@@ -221,6 +271,7 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   HTTPClient http;
   if (!http.begin(client, url)) {
     Serial.println("adsb: http.begin failed");
+    setFailure(FetchStatus::ConnectionLost, 0);
     return false;
   }
 
@@ -229,6 +280,7 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   const int code = performGetWithPoll(http);
   if (code != HTTP_CODE_OK) {
     Serial.printf("adsb: HTTP %d\n", code);
+    setFailure(statusForHttpCode(code), code);
     http.end();
     return false;
   }
@@ -236,6 +288,7 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   String payload;
   if (!readResponseBodyWithPoll(http, payload)) {
     Serial.println("adsb: empty response");
+    setFailure(FetchStatus::BadResponse, HTTP_CODE_OK, "empty response");
     http.end();
     return false;
   }
@@ -245,8 +298,20 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
   const DeserializationError err = deserializeJson(doc, payload);
   if (err) {
     Serial.printf("adsb: JSON parse error: %s\n", err.c_str());
+    setFailure(FetchStatus::BadResponse, HTTP_CODE_OK, err.c_str());
     return false;
   }
+
+  // adsb.fi sends "msg": "No error" on success; anything else is an API-level error.
+  const char* api_msg = doc["msg"] | "No error";
+  if (strcmp(api_msg, "No error") != 0) {
+    Serial.printf("adsb: API error: %s\n", api_msg);
+    setFailure(FetchStatus::BadResponse, HTTP_CODE_OK, api_msg);
+    return false;
+  }
+
+  s_status = FetchStatus::Ok;
+  s_last_ok_ms = std::max(millis(), 1UL);  // 0 means "never"
 
   JsonArray ac = doc["ac"].as<JsonArray>();
   if (ac.isNull()) {

@@ -57,10 +57,10 @@ void handleButtons() {
 
 void fetchAndDrawAircraft() {
   const float fetch_km = ui::radar::fetchRadiusKm();
-  if (services::adsb::fetchUpdate(services::location::lat(),
-                                  services::location::lon(), fetch_km)) {
-    ui::radarDisplayRefreshAircraft();
-  }
+  // Redraw on failure too, so stale aircraft are replaced by the error once they expire.
+  services::adsb::fetchUpdate(services::location::lat(), services::location::lon(),
+                              fetch_km);
+  ui::radarDisplayRefreshAircraft();
   // Internal RAM headroom (bounce buffers and TLS both come from it).
   Serial.printf("Heap internal: free %u KB, min ever %u KB, largest block %u KB\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024,
@@ -110,6 +110,8 @@ void loop() {
     if (g_radar_visible) {
       Serial.println("WiFi lost — will reconnect");
       g_radar_visible = false;
+      // Don't bring the old aircraft back when the radar returns.
+      services::adsb::invalidate();
     }
 
     if (g_wifi_down_since == 0) {
