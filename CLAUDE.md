@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Arduino/PlatformIO firmware for an ESP32-C3 Super Mini driving a 1.28" round GC9A01 (240×240) display. It shows a sonar-style radar of live ADS-B aircraft from `opendata.adsb.fi` around a configured lat/lon. Wi-Fi, location, units and the runway toggle are set through a WiFiManager captive portal (AP `PlaneRadar-Setup`, mDNS `plane-radar.local`), which also stays up on the LAN IP after the device connects.
+Arduino/PlatformIO firmware for an Adafruit Qualia ESP32-S3 (N16R8: 16 MB flash, 8 MB octal PSRAM) driving a 4" round 720×720 RGB-666 panel (NV3052C, treated as Adafruit's HD40015C40). It was ported from an ESP32-C3 + 1.28" GC9A01 (240×240) build; `docs/qualia-port-plan.md` records that port, its decisions and the open issues. It shows a sonar-style radar of live ADS-B aircraft from `opendata.adsb.fi` around a configured lat/lon. Wi-Fi, location, units and the runway toggle are set through a WiFiManager captive portal (AP `PlaneRadar-Setup`, mDNS `plane-radar.local`), which also stays up on the LAN IP after the device connects.
 
 ## Commands
 
-There is one PlatformIO environment, `qualia` (pioarduino platform, Arduino core 3.x). A port from the ESP32-C3/GC9A01 build is in progress: see `docs/qualia-port-plan.md` for the phased plan and progress. The repo has no unit tests or linter. CI (`.github/workflows/build.yml`) only checks that the firmware builds.
+The firmware env is `qualia` (pinned pioarduino platform, Arduino core 3.x / ESP-IDF 5). `qualia_panel_test` extends it with `-DPANEL_TEST` and runs `hardware/panel_test` instead of the app (color bars, circles, text, looped HTTPS, button levels). The repo has no unit tests or linter. CI (`.github/workflows/build.yml`) only checks that the firmware builds.
 
 ```bash
 pio run -e qualia                    # build; also writes .pio/build/qualia/firmware.factory.bin (flash at 0x0)
@@ -19,20 +19,23 @@ python3 scripts/build_large_airports.py    # regenerate the runway dataset from 
 python3 scripts/build_vlw_font.py          # regenerate data/ui_font_*.vlw (needs: pip install freetype-py)
 ```
 
+On Windows, run `pio` from PowerShell or cmd, not Git Bash: ESP-IDF's tool installer refuses MSys, so the toolchain never installs. If upload can't find the port, hold BOOT and tap RESET.
+
 pioarduino builds the merged `firmware.factory.bin` itself (bootloader, partitions, boot_app0, the board's TinyUF2 image and the app). Pushing a `v*` tag runs `release.yml`, which attaches `plane-radar-<tag>.bin` and its `.sha256` to a GitHub Release.
 
 ## Architecture
 
-`src/main.cpp` owns the control flow in `setup()`/`loop()`: it polls the BOOT button, runs `wifiLoop()`, handles Wi-Fi drop and reconnect (a grace period, then rate-limited `wifiReconnect()`, which never reopens the portal), and fetches ADS-B every `config::kAdsbFetchIntervalMs`. The other modules are passive and get called from there.
+`src/main.cpp` owns the control flow in `setup()`/`loop()`: it drains button taps (UP = zoom out, DOWN = zoom in), runs `wifiLoop()`, handles Wi-Fi drop and reconnect (a grace period, then rate-limited `wifiReconnect()`, which never reopens the portal), and fetches ADS-B every `config::kAdsbFetchIntervalMs` (5 s), redrawing after every fetch whether or not it succeeded. On a Wi-Fi drop it calls `services::adsb::invalidate()` so old aircraft don't come back as live. The other modules are passive and get called from there, except the button task.
 
-- `include/config.h` holds all hardware pins, timing and defaults in `namespace config` as `constexpr` values. The README says the fetch interval is 5 s, but the code uses 3000 ms. adsb.fi's public limit is 1 req/s.
-- `services/wifi_setup` wraps WiFiManager, the portal's custom fields (lat/lon, miles, runways), mDNS, and the BOOT button. The button uses an interrupt that latches taps, so a tap still registers during blocking HTTP or draw work. A short tap cycles the range. Holding 3 s clears credentials, location and units, then reboots into the portal.
-- `services/adsb_client` does a blocking HTTPS GET. It reads chunked or sized bodies by hand, parses with ArduinoJson into a fixed `Aircraft[64]` array, and calls a `PollFn` hook (set to `wifiLoop`) during long I/O so the portal stays responsive.
+- `include/config.h` holds all hardware pins, panel timings, timing and defaults in `namespace config` as `constexpr` values. adsb.fi's public limit is 1 req/s. `kPanelPclkHz` is 12 MHz: at 16 MHz Wi-Fi stops working (likely PSRAM contention with the panel scan-out; see the plan's open issues).
+- `services/wifi_setup` wraps WiFiManager, the portal's custom fields (lat/lon, miles, runways) and mDNS. It checks `buttonsResetRequested()` in `wifiLoop()`, the connect wait and the portal loop; holding UP 3 s clears credentials, location and units, then reboots into the portal.
+- `hardware/buttons` polls UP/DOWN on the PCA9554 expander (pins 5/6, active low; the expander INT isn't wired) from a FreeRTOS task on core 0 every 20 ms, with a 2-sample debounce and a depth-4 tap queue, so taps register during blocking HTTP or draw work. A press held through a reset is ignored until released. **GPIO0/BOOT is display line B4 and must not be used at runtime.**
+- `services/adsb_client` does a blocking HTTPS GET. It reads chunked or sized bodies by hand, parses with ArduinoJson into a fixed `Aircraft[64]` array, and calls a `PollFn` hook (set to `wifiLoop`) during long I/O so the portal stays responsive. adsb.fi errors are bare HTTP statuses, so each fetch records a `FetchStatus` from the transport (plus the API's `msg` if it isn't "No error"). `aircraftFresh()` is false after `kAdsbStaleAfterMs` (30 s) without a good fetch.
 - `services/radar_location` stores the radar center in NVS.
 - `ui/radar_range` holds the range presets (`kRangePresets`), the miles/runway flags, and `fetchRadiusKm()`. The fetch radius scales to the screen edge, so aircraft beyond the outer ring still arrive as rim dots.
-- `ui/radar_display` renders every frame in full (grid, runways, labels, aircraft) into `canvas`, then calls `displayPresent()` once, which avoids flicker. It logs draw and present times per frame.
+- `ui/radar_display` renders every frame in full (grid, runways, labels, aircraft) into `canvas`, then calls `displayPresent()` once, which avoids flicker. When the data isn't fresh it draws the reason (`describeFetchProblem`) instead of aircraft. It logs draw and present times per frame (about 110 ms + 4 ms per aircraft, and 100 ms).
 - `ui/runway_overlay` draws runways from `data/large_airports` (coordinates stored as int32 `e7`). `src/data/large_airports_data.cpp` and `include/data/large_airports.h` are **generated** by `scripts/build_large_airports.py`. Don't hand-edit them.
-- `ui/radar_theme.h` holds layout constants and colors. `ui/status_screens` draws the setup and connecting screens.
+- `ui/radar_theme.h` holds layout constants and colors. `ui/status_screens` draws the setup and connecting screens; the spinner pushes only the small rects around its dots with `displayPresentRect()`.
 - `hardware/panel` is the only file that includes Arduino_GFX. It initializes the RGB panel through the PCA9554 expander and owns the framebuffer. `hardware/display` owns `canvas`, a 720×720 16-bit `LGFX_Sprite` in PSRAM (stored byte-swapped), and copies it to the panel with `displayPresent()` / `displayPresentRect()`. All drawing goes through LovyanGFX into `canvas`. If the canvas can't be allocated, boot stops with an error (PSRAM misconfigured). `hardware/display_font` holds the anti-aliased VLW fonts that `board_build.embed_files` embeds (`data/ui_font_small.vlw` / `ui_font_large.vlw`). `displayFontApply(gfx, height_px)` picks the smallest file at least that tall and scales it down. `FreeSansBold24pt7b` is the only bitmap fallback. The VLW files are **generated** by `scripts/build_vlw_font.py` (freetype-py) from `fonts/NotoSans-Bold.ttf`.
 
 Lat/lon is projected to screen space with an equirectangular approximation: `dx = Δlon·kKmPerDeg·cos(center_lat)`, `dy = Δlat·kKmPerDeg`. It lives in `ui/radar_geometry`, which both `radar_display.cpp` and `runway_overlay.cpp` use.
@@ -50,4 +53,5 @@ Preferences live in separate namespaces: `planeradar` (range preset, miles, runw
 ## Conventions
 
 - C++17 (`-std=gnu++17`). Code is split into `include/<area>/*.h` and `src/<area>/*.cpp` under namespaces `services::*`, `ui`, and `ui::radar` / `ui::runway`. File-local state uses anonymous namespaces with an `s_` prefix, and constants use a `k` prefix.
-- Colors are RGB565. The panel needs `kDisplayInvert = true` and BGR order.
+- Colors are standard RGB565 (`canvas.color565()`); `canvas` stores them byte-swapped and `panelPushBe565` handles that. There's no color inversion or BGR swap on this panel.
+- Keep Arduino_GFX includes inside `hardware/panel.cpp`. Everything else draws with LovyanGFX into `canvas`.

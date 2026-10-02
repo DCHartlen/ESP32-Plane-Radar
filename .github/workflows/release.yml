@@ -51,7 +51,17 @@ jobs:
           sha256sum "dist/plane-radar-${VERSION}.bin" > "dist/plane-radar-${VERSION}.bin.sha256"
           echo "version=${VERSION}" >> "$GITHUB_ENV"
 
+      # A manual run has no tag, so it uploads the packaged files instead of publishing.
+      - name: Upload packaged files (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plane-radar-${{ env.version }}
+          if-no-files-found: error
+          path: dist/*
+
       - name: Publish GitHub Release
+        if: github.event_name != 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
