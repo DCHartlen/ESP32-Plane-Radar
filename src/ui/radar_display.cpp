@@ -513,8 +513,8 @@ void drawStaticGrid() {
 
 }  // namespace
 
-// Composite the grid and aircraft into the off-screen canvas, then copy it to
-// the panel in one pass, so labels never show an erase/redraw gap.
+// Draw the grid and aircraft into the back framebuffer, then swap it on screen,
+// so labels never show an erase/redraw gap.
 void radarDisplayDraw() {
   const unsigned long t0 = millis();
   initPalette();

@@ -2,14 +2,18 @@
 
 #include <LovyanGFX.hpp>
 
-/** Full-screen 16-bit drawing surface in PSRAM (RGB565, stored byte-swapped). */
+/**
+ * Full-screen 16-bit drawing surface (RGB565, native byte order). It points at the
+ * panel's back framebuffer in PSRAM, which holds the frame before last, so every
+ * frame must be drawn in full.
+ */
 extern LGFX_Sprite canvas;
 
-/** Panel + canvas + font. Halts with a serial error if either can't be set up. */
+/** Panel + canvas + font. Halts with a serial error if the panel can't be set up. */
 void displayInit();
 
-/** Copy the whole canvas to the panel. */
+/** Show the canvas on the next refresh, then point it at the other framebuffer. */
 void displayPresent();
 
-/** Copy one canvas rectangle to the panel (clipped to the screen). */
-void displayPresentRect(int x, int y, int w, int h);
+/** Re-align the panel's scan-out after a flash write may have shifted the image. */
+void displayResync();

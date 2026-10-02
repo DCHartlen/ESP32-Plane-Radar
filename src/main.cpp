@@ -86,6 +86,10 @@ void setup() {
                 static_cast<unsigned>(ESP.getFreePsram() / 1024));
 
   displayInit();
+  // Wi-Fi's first connect writes to flash, which can stall the panel refill and leave the
+  // image shifted up. Re-align the scan-out once the link is up.
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { displayResync(); },
+               ARDUINO_EVENT_WIFI_STA_GOT_IP);
 #ifdef PANEL_TEST
   panelTestRun();
 #endif

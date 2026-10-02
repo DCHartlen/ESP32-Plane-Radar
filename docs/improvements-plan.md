@@ -1,6 +1,6 @@
 # Improvements plan (after the Qualia port)
 
-Status: **ideas / not started.** Finish `docs/qualia-port-plan.md` first. This plan collects what the
+Status: **roadmap step 1 (faster display output) done 2026-10-02; the rest not started.** This plan collects what the
 upstream forks have built, picks what's worth bringing over to the 720×720 Qualia build, and
 includes the auto-brightness plan.
 
@@ -34,18 +34,16 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
   - `pclk_active_neg = 0` (ours is 1): not needed for 16 MHz. Only worth trying if fine detail
     shimmers.
   - `periph_module_reset(PERIPH_LCD_CAM_MODULE)` before init, and `esp_lcd_rgb_panel_restart()`
-    after, so a warm reboot doesn't shift the image vertically. Bring over with the rewrite.
+    after, so a warm reboot doesn't shift the image vertically. Done with the no-copy present.
   - `WiFi.setSleep(WIFI_PS_NONE)`: we already do this. `WiFi.setTxPower(WIFI_POWER_8_5dBm)` isn't
     theirs: it's an upstream ESP32-C3 fix (WatskeBart, `2e2808e`) merged into their fork, and it
     crippled our setup AP in Phase 2. Don't bring it over.
-- **No-copy present.** LovyanGFX draws straight into the panel's back framebuffer
-  (`tft.setBuffer(qualiaRgbBackBuffer(), ...)`, color depth `rgb565_nonswapped`), and presenting
-  calls `esp_lcd_panel_draw_bitmap` with the driver's own buffer, which switches buffers instead
-  of copying. Then `setBuffer` points at the new back buffer. This removes our ~110 ms present.
-  It works because we already redraw the full frame every time. Their comment says
-  `draw_bitmap` blocks until the swap; Espressif's anti-tearing example instead waits on a
-  semaphore from the `on_frame_buf_complete` callback, so add that wait and check for tearing on
-  hardware.
+- **No-copy present. Done here (2026-10-02):** LovyanGFX draws straight into the panel's back
+  framebuffer (`setBuffer`, color depth `rgb565_nonswapped`), and presenting calls
+  `esp_lcd_panel_draw_bitmap` with the driver's own buffer, which switches buffers instead of
+  copying. Unlike theirs, `panelSwap()` then waits on the `on_frame_buf_complete` callback until
+  the old buffer is off screen, so the next frame never draws into the visible one. Present went
+  from ~110 ms to 0–40 ms (the rest of the current refresh). See `hardware/panel.cpp`.
 - **Smooth motion.** Between fetches each aircraft is dead-reckoned along `track_deg` at
   `gs_knots`, seeded with the ADS-B `seen_pos` age, and the radar redraws at 4 Hz
   (`kRadarRedrawIntervalMs = 250`). The fetch runs on a background FreeRTOS task. Commits
@@ -68,7 +66,7 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 | Plane icons by type (jet, light plane, spinning helicopter, balloon) | timclarke07, vfranchi | Partly. They're 10–16 px bitmaps; redo as polygons through `ui::px()` or regenerate larger. |
 | Highlights: military, emergency squawk (7500/7600/7700), favorites | GCamilleri, giplgwm, dreamiurg, mlciskey, oldjiberjaber, benyaffe | Yes. Small change. |
 | Climb/descend arrow, flight levels | cuotos, JoaoCostaIFG, blinkidy | Yes. |
-| Rotating sweep line | GCamilleri, smgam29, daredevilbear, RockBase-iot | Not until frames are faster. At ~3 fps it stutters. |
+| Rotating sweep line | GCamilleri, smgam29, daredevilbear, RockBase-iot | Not until drawing is faster. At ~3.5 fps it stutters. |
 | Land, terrain and coastline fill | benyaffe (filled land tiles), bartdelange (shaded terrain) | Easier than on the C3: draw the background once into a PSRAM sprite and copy it each frame. Big project. |
 | Route labels (origin → destination, airline) | blinkidy, devnulluk, Niko12345678, bartdelange, JoaoCostaIFG | Yes; room for another tag line. Needs extra adsbdb lookups. |
 | Extra screens (cockpit clock with wind and pressure, airport weather map) | benyaffe | Yes, but a lot of work. |
@@ -76,28 +74,33 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 
 ## Current frame budget
 
-At 16 MHz pclk (2026-10-02): draw ~140 ms with no aircraft, plus ~5.5 ms per aircraft (~245 ms
-with 20), then present ~110 ms. That's ~380 ms per frame with 25 aircraft, ~2.6 fps. At 12 MHz
-(Phase 6) it was draw ~107 ms + ~4 ms per aircraft, present ~100 ms. The canvas is in PSRAM,
-and the faster scan-out leaves less PSRAM bandwidth for drawing.
+With the no-copy present at 16 MHz (2026-10-02): draw ~230–250 ms with 16–19 aircraft, present
+0–40 ms. That's ~250–280 ms per frame, ~3.5–4 fps. Drawing didn't get faster: the framebuffers
+are in PSRAM like the old canvas was.
 
-Smooth motion at 4 Hz needs under 250 ms, and a sweep needs more. The no-copy present removes
-the ~110 ms present, but drawing alone is over 250 ms with 20+ aircraft. Getting there also
-needs cheaper drawing (for example, caching the static grid and runways and copying them in
-each frame) or a lower redraw rate.
+| | Draw, ~20 aircraft | Present | Frame |
+|---|---|---|---|
+| 12 MHz, copy (Phase 6) | ~185 ms | ~100 ms | ~285 ms |
+| 16 MHz, copy | ~245 ms | ~110 ms | ~355 ms |
+| 16 MHz, no-copy | ~240 ms | 0–40 ms | ~260 ms |
+
+Smooth motion at 4 Hz needs under 250 ms, and a sweep needs more. That's close now. pvanbaren's
+loop redraws as fast as it can up to 4 Hz, which would give ~3.5 Hz here. If that looks steppy,
+drawing has to get cheaper; profile which parts cost most (anti-aliased labels read back the
+pixels they blend onto) before caching anything.
 
 ## Roadmap
 
-1. **Faster display output** (pvanbaren). 16 MHz with the 36-line bounce buffer is done. Next:
-   own the RGB panel through `esp_lcd` in `panel.cpp`. Arduino_GFX keeps the expander and the
-   NV3052C init sequence (`batchOperation(hd40015c40_init_operations)`). Draw into the back
-   framebuffer, present by swapping after a VSYNC wait, and add the LCD_CAM reset and restart.
-   The connecting spinner and the panel test redraw the full frame instead of pushing rects.
-   Check: present time, tearing, spinner, Wi-Fi and setup AP, warm reboot alignment. No build
-   changes needed: the current framework has all the esp_lcd calls. Then cheaper drawing (see
-   "Current frame budget").
-2. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task, dead-reckon between
-   fetches with `seen_pos`, redraw at 4 Hz.
+1. **Faster display output** (pvanbaren). **Done 2026-10-02, verified on hardware:** 16 MHz
+   with 36-line bounce buffers, the panel owned through `esp_lcd` with two framebuffers and a
+   no-copy swap, LCD_CAM reset, and a scan-out resync on Wi-Fi connect. Checked: present time,
+   colors, spinner, Wi-Fi and setup AP, warm reboot. Not adopted: `pclk_active_neg = 0` (only
+   if fine detail shimmers) and `setTxPower`.
+2. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task (their fetch task
+   fills the aircraft list under a mutex; drawing takes a snapshot per frame), dead-reckon between
+   fetches with `seen_pos`, and redraw every 250 ms instead of after each fetch. Settle first:
+   `adsb_client`'s `PollFn` (portal servicing during a fetch), Wi-Fi drop handling and
+   `invalidate()`, and applying a range change on the next frame.
 3. **Label decluttering** (blinkidy). Closes the tag-overlap item in the port plan.
 4. **Color by altitude and fading trails** (selmapi). Cheap and noticeable.
 5. **Auto-brightness** (below). Independent of 1–4; can be done any time.

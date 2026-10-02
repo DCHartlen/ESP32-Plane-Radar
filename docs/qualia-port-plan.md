@@ -220,7 +220,7 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
   `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n` (pioarduino recompiles the framework, first build
   10–30 min), then PSRAM at 120 MHz, then dropping pclk while the portal is open.
 
-### Frame roll with bounce buffers (2026-10-02, not seen since 36-line buffers)
+### Frame roll with bounce buffers (2026-10-02, once since 36-line buffers; fix pending test)
 
 - **Symptom:** the whole image rolled up ~30-40 rows (N drawn under S) and stayed that way for
   minutes while the radar kept redrawing. It's a bounce-buffer refill slip (20-line buffers), and
@@ -228,12 +228,28 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 - **Likely triggers:** flash writes (NVS range save, Wi-Fi connect) while the RGB ISR isn't
   IRAM-safe, and PSRAM load from the 1 MB present copy.
 - **Status:** not seen at 16 MHz with 36-line buffers, including range changes with NVS saves
-  over several minutes (2026-10-02). Keep watching; it was intermittent.
-- **If it comes back:** the no-copy esp_lcd rewrite (`docs/improvements-plan.md`, roadmap
-  step 1) removes the copy load and adds pvanbaren's LCD_CAM reset and
-  `esp_lcd_rgb_panel_restart()`. Last resort: rebuild the framework with `custom_sdkconfig`:
-  `CONFIG_LCD_RGB_ISR_IRAM_SAFE=y`, `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`,
-  `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`.
+  over several minutes (2026-10-02). The no-copy esp_lcd rewrite (`docs/improvements-plan.md`,
+  roadmap step 1) has since removed the 1 MB copy load.
+- **One slip after the rewrite:** in the panel test, the image shifted up right after Wi-Fi first
+  connected (the driver writes to flash then) and stayed shifted until reset. Minutes of running
+  and button presses didn't cause another. Fix: `setup()` calls `displayResync()`
+  (`esp_lcd_rgb_panel_restart()`, re-aligns at the next VSYNC) on `ARDUINO_EVENT_WIFI_STA_GOT_IP`;
+  the serial log prints `panel: scan-out resync`. **Not yet verified on hardware.**
+- **If slips show up at other times:** call `displayResync()` after those flash writes too, or
+  rebuild the framework with `custom_sdkconfig`: `CONFIG_LCD_RGB_ISR_IRAM_SAFE=y` (the actual
+  cause: the refill ISR can't run while flash is written), possibly with
+  `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`, `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`,
+  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`.
+
+### Wi-Fi credentials lost after a hold-UP reset (fixed 2026-10-02)
+
+- **Symptom:** after hold-UP reset and setup through the portal, the device connected, but the
+  next reboot had no saved credentials.
+- **Cause:** core 3.x picks credential storage (flash or RAM) each time Wi-Fi starts, from
+  `WiFi.persistent()`, and `WIFI_OFF` shuts Wi-Fi down fully. `eraseWifiCredentials()` left it
+  `false`, so the portal started Wi-Fi in RAM-only mode.
+- **Fix:** `eraseWifiCredentials()` sets `WiFi.persistent(true)` (the core default) when done.
+  Verified: hold-UP, setup, then RESET reconnects without the portal.
 
 ### Appearance tuning (later)
 

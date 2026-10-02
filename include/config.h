@@ -79,7 +79,8 @@ constexpr uint16_t kPanelPclkActiveNeg = 1;
 // at 12 MHz because the scan-out reads PSRAM faster.
 constexpr int32_t kPanelPclkHz = 16000000;
 /**
- * SRAM bounce buffer (pixels, line count must divide 720); 0 = scan straight from PSRAM.
+ * SRAM bounce buffer (pixels, line count must divide 720). Required: the double-buffered
+ * panel relies on it (see panel.cpp).
  * Two are allocated in internal RAM (36 lines = 2 x 51.8 KB). Fewer lines slipped the
  * frame (vertical shift) under Wi-Fi + present load, and 10 lines broke Wi-Fi at 16 MHz.
  */
