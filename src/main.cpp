@@ -6,6 +6,7 @@
 #include <WiFi.h>
 
 #include "config.h"
+#include "hardware/buttons.h"
 #include "hardware/display.h"
 #include "hardware/panel_test.h"
 #include "services/adsb_client.h"
@@ -31,8 +32,18 @@ void showRadarIfConnected() {
   g_radar_visible = true;
 }
 
-void onRangeTap() {
-  ui::radar::rangeNext();
+/** UP = zoom out, DOWN = zoom in. Drains every queued tap, then redraws once. */
+void handleButtons() {
+  bool changed = false;
+  for (ButtonEvent event = buttonsConsumeEvent(); event != ButtonEvent::None;
+       event = buttonsConsumeEvent()) {
+    changed |= (event == ButtonEvent::Up) ? ui::radar::rangeNext() : ui::radar::rangePrev();
+  }
+  ui::radar::rangeSaveIfDue();
+  if (!changed) {
+    return;
+  }
+
   char range_label[12];
   ui::radar::formatCurrentRing3Label(range_label, sizeof(range_label));
   Serial.printf("Range: %s (outer ~%.0f km)\n", range_label,
@@ -43,22 +54,13 @@ void onRangeTap() {
   }
 }
 
-void handleBootButton() {
-  bootButtonPollLongPress();
-  if (bootButtonConsumeTap()) {
-    onRangeTap();
-  }
-}
-
 void fetchAndDrawAircraft() {
   const float fetch_km = ui::radar::fetchRadiusKm();
-  if (!services::adsb::fetchUpdate(services::location::lat(),
-                                   services::location::lon(), fetch_km)) {
-    handleBootButton();
-    return;
+  if (services::adsb::fetchUpdate(services::location::lat(),
+                                  services::location::lon(), fetch_km)) {
+    ui::radarDisplayRefreshAircraft();
   }
-  ui::radarDisplayRefreshAircraft();
-  handleBootButton();
+  handleButtons();
 }
 
 }  // namespace
@@ -77,11 +79,11 @@ void setup() {
                 static_cast<unsigned>(ESP.getPsramSize() / 1024),
                 static_cast<unsigned>(ESP.getFreePsram() / 1024));
 
-  bootButtonInit();
   displayInit();
 #ifdef PANEL_TEST
   panelTestRun();
 #endif
+  buttonsInit();
   if (wifiShowsSetupScreenOnBoot()) {
     statusScreenPortal();
   }
@@ -95,7 +97,7 @@ void setup() {
 }
 
 void loop() {
-  handleBootButton();
+  handleButtons();
   wifiLoop();
 
   if (WiFi.status() != WL_CONNECTED) {

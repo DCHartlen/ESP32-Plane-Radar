@@ -1,7 +1,9 @@
 #include "ui/radar_range.h"
 
+#include "config.h"
 #include "ui/radar_theme.h"
 
+#include <Arduino.h>
 #include <Preferences.h>
 #include <cmath>
 #include <cstdio>
@@ -22,6 +24,8 @@ Preferences s_prefs;
 uint8_t s_range_index = kDefaultRangeIndex;
 bool s_use_miles = false;
 bool s_show_runways = true;
+bool s_range_save_pending = false;
+unsigned long s_range_changed_ms = 0;
 
 void saveRangeIndex() {
   if (!s_prefs.begin(kPrefsNamespace, false)) {
@@ -73,9 +77,31 @@ void rangeInit() {
   s_prefs.end();
 }
 
-void rangeNext() {
-  s_range_index = static_cast<uint8_t>((s_range_index + 1) % kRangePresetCount);
-  saveRangeIndex();
+bool rangeNext() {
+  if (s_range_index + 1 >= kRangePresetCount) {
+    return false;
+  }
+  ++s_range_index;
+  s_range_save_pending = true;
+  s_range_changed_ms = millis();
+  return true;
+}
+
+bool rangePrev() {
+  if (s_range_index == 0) {
+    return false;
+  }
+  --s_range_index;
+  s_range_save_pending = true;
+  s_range_changed_ms = millis();
+  return true;
+}
+
+void rangeSaveIfDue() {
+  if (s_range_save_pending && millis() - s_range_changed_ms >= config::kRangeSaveDelayMs) {
+    s_range_save_pending = false;
+    saveRangeIndex();
+  }
 }
 
 const RangePreset& rangeCurrent() { return kRangePresets[s_range_index]; }

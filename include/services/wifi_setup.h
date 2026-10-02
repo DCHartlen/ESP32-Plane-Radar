@@ -7,9 +7,8 @@ void wifiResetCredentialsAndReboot();
 bool wifiSetupConnect();
 /** Reconnect using saved creds; never opens the captive portal. */
 bool wifiReconnect();
-/** Keeps the LAN config portal alive; call every loop() iteration. */
+/**
+ * Keeps the LAN config portal alive and acts on a hold-UP reset; call every loop()
+ * iteration (also the adsb poll hook during long HTTP I/O).
+ */
 void wifiLoop();
-/** No-op placeholders until the expander buttons land (Phase 3). */
-void bootButtonInit();
-bool bootButtonConsumeTap();
-void bootButtonPollLongPress();

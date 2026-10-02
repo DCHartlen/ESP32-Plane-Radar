@@ -25,6 +25,10 @@ constexpr unsigned long kWifiReconnectIntervalMs = 15000;
 // --- Buttons (Qualia UP/DOWN on the PCA9554 expander; GPIO0/BOOT is display line B4) ---
 /** Holding UP this long clears Wi-Fi + settings and reboots into the portal. */
 constexpr unsigned long kResetHoldMs = 3000UL;
+/** Expander poll period; a level counts after 2 identical samples in a row. */
+constexpr unsigned long kButtonPollMs = 20;
+/** Range taps are saved to NVS once no tap has arrived for this long. */
+constexpr unsigned long kRangeSaveDelayMs = 2000;
 
 // --- I2C (expander) ---
 constexpr int kI2cPinSda = 8;
@@ -69,9 +73,10 @@ constexpr uint16_t kPanelPclkActiveNeg = 1;
  * Refresh = pclk / (812 * 802): 12 MHz ~18 Hz (dark shades flicker on hardware),
  * 16 MHz ~25 Hz, 20 MHz ~31 Hz. Lower it if the image jitters or drifts under Wi-Fi load.
  */
-// Measured: 12 MHz = STA + HTTPS clean. 16 MHz = Wi-Fi can't connect (STA or AP).
-// The setup AP at 12 MHz is still unverified (8 MHz works).
-constexpr int32_t kPanelPclkHz = 12000000;
+// Measured: 12 MHz = setup AP and STA + HTTPS work (keep metal away from the antenna;
+// a shielding bag under the board made the AP unusable). 16 MHz looks better, but Wi-Fi
+// can't connect, even in STA mode.
+constexpr int32_t kPanelPclkHz = 12000000;  // See "Open issues" in docs/qualia-port-plan.md
 /** SRAM bounce buffer (pixels, must divide 720*720); 0 = scan straight from PSRAM. */
 constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 10;
 /** Rotate the whole UI 180 degrees if the panel is mounted upside down. */

@@ -196,6 +196,30 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 - Workspace and `.vscode` env names. The untracked `parts` note goes into the README or gets deleted.
 - Confirm CI and the release workflow with `workflow_dispatch`.
 
+## Open issues
+
+### Pixel clock is capped at 12 MHz by Wi-Fi (revisit after Phase 4)
+
+- **Symptom:** 16 MHz pclk (~25 Hz refresh) looks clearly better than 12 MHz (~18 Hz, thin
+  lines and dark shades shimmer), but at 16 MHz Wi-Fi never connects, even in STA mode to a
+  nearby router with nothing metal near the antenna (status 6/4 forever). 12 MHz works for
+  STA, HTTPS and the setup AP.
+- **Likely cause: PSRAM contention.** The RGB panel has no memory of its own, so the S3
+  streams the whole 720×720 frame from PSRAM all the time (about 32 MB/s at 16 MHz). The
+  precompiled pioarduino framework has `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` (Wi-Fi/lwIP
+  buffers in PSRAM) and `CONFIG_SPIRAM_SPEED=80`, so Wi-Fi competes with the scan-out. That's
+  the framework default for S3 + PSRAM, not something this port changed. The C3 had no PSRAM,
+  and the GC9A01 had its own GRAM. RF interference from the panel bus isn't ruled out.
+- **Fix to try if the shimmer still matters after Phase 4** (thicker lines may hide it):
+  1. `custom_sdkconfig` in `platformio.ini` with `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`.
+     pioarduino then recompiles the Arduino framework (first build 10–30 min, downloads
+     ESP-IDF, can hit Windows long-path or antivirus locks). Internal RAM is ~28% used, so
+     there's room. Then retest 16 MHz with `qualia_panel_test`.
+  2. If still not enough: PSRAM at 120 MHz (experimental for octal PSRAM on S3).
+  3. If 16 MHz still fails after both, it's probably RF and 12 MHz is the limit.
+- If only the setup AP stays fragile: the runtime-pclk fallback in the Phase 3 notes (drop
+  to 8 MHz while the portal is open).
+
 ## Things only the hardware can settle
 
 1. **Pixel clock and bounce buffers.** Tune them in Phase 2. The fallback is a lower clock.
@@ -211,8 +235,8 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 | Phase | Status | Notes |
 |---|---|---|
 | 1 Build system | Done, verified on hardware | Builds on pioarduino 55.03.312-1 (core 3.3.12, IDF 5.5.5): 1.42 MB app, 28% RAM. esptool reports 8 MB PSRAM and 16 MB flash. |
-| 2 Display | In progress on hardware | **Hardware results (2026-10-01):** colors, R/G/B order and byte order correct; circles round, centered, edge fully visible; buttons active-low (`kButtonActiveLow`). Text is fuzzy because the old font is upscaled (fixed in Phase 5). **Pclk vs Wi-Fi:** at 12 MHz (~18 Hz refresh) dark shades flicker, green most. At 16 MHz the setup AP was unusable (phones got no IP, AP dropped) and STA can't connect at all (status 4, connect failed); at 8 MHz the portal works. At 12 MHz STA + HTTPS is clean (19/19 fetches, ~1 s each, full present ~75 ms). **Pclk is set to 12 MHz.** The flicker is thin-line/dim-shade shimmer from the low refresh, not aliasing. Still to do: verify the setup AP at 12 MHz (needs Phase 3's hold-UP reset), and the HTTPS jitter check. Options for going faster: Wi-Fi/lwIP buffers in internal RAM (`custom_sdkconfig`), PSRAM at 120 MHz, smaller porches, or dropping pclk while the portal is open. The C3 `setTxPower(8.5 dBm)` workaround was removed early (it crippled the AP). TEMP diagnostics to revert: pclk 8 MHz, `WM_NODEBUG` removed, reset-reason print. Original notes: | `panel`, `display` (PSRAM `canvas`) and the `qualia_panel_test` env build. Starting values: pclk 12 MHz, 7200 px bounce buffer, rotation 0 (`kDisplayRotate180` flips the canvas). BOOT/GPIO0 handling is stubbed out until Phase 3. The radar still uses the 240 px layout (top-left of the screen) until Phase 4. Test: `pio run -e qualia_panel_test -t upload`, then check the five items above against the serial log. |
-| 3 Buttons | Not started | |
+| 2 Display | Done, verified on hardware | **Hardware results (2026-10-01):** colors, R/G/B order and byte order correct; circles round, centered, edge fully visible; buttons active-low (`kButtonActiveLow`). Text is fuzzy because the old font is upscaled (fixed in Phase 5). **Pclk vs Wi-Fi:** at 12 MHz (~18 Hz refresh) dark shades flicker, green most. At 16 MHz the setup AP was unusable (phones got no IP, AP dropped) and STA can't connect at all (status 4, connect failed); at 8 MHz the portal works. At 12 MHz STA + HTTPS is clean (19/19 fetches, ~1 s each, full present ~75 ms). **Pclk is set to 12 MHz.** The flicker is thin-line/dim-shade shimmer from the low refresh, not aliasing. The setup AP at 12 MHz was verified in Phase 3. No jitter was reported during fetches (not checked closely). Options for going faster: Wi-Fi/lwIP buffers in internal RAM (`custom_sdkconfig`), PSRAM at 120 MHz, smaller porches, or dropping pclk while the portal is open. The C3 `setTxPower(8.5 dBm)` workaround was removed early (it crippled the AP). Diagnostics reverted (`WM_NODEBUG` back). The boot now waits up to 3 s for the USB monitor and prints the reset reason. Original notes: | `panel`, `display` (PSRAM `canvas`) and the `qualia_panel_test` env build. Starting values: pclk 12 MHz, 7200 px bounce buffer, rotation 0 (`kDisplayRotate180` flips the canvas). BOOT/GPIO0 handling is stubbed out until Phase 3. The radar still uses the 240 px layout (top-left of the screen) until Phase 4. Test: `pio run -e qualia_panel_test -t upload`, then check the five items above against the serial log. |
+| 3 Buttons | Done, verified on hardware | Taps, double tap, tap during fetch, hold-UP reset into the portal, and the setup portal at 12 MHz all work. The earlier weak, flaky AP was mostly a metallized anti-static bag under the board's antenna. **Keep metal away from the antenna end in the enclosure.** Fallback if the AP is flaky again: own the RGB panel through esp_lcd in `panel.cpp` (Arduino_GFX keeps only the init sequence) so pclk can drop to 8 MHz while the portal is open. Note: a reset wipes the location, and the portal pre-fills the Amsterdam default. | `hardware/buttons` task (core 0, 20 ms, 2-sample debounce, depth-4 queue). A press held over a reset is ignored until released, so the reboot can't loop. Range clamps (`rangeNext`/`rangePrev`) and saves to NVS 2 s after the last tap. Reset is checked in `wifiLoop` (so also during HTTP), the connect wait and the portal loop. **Extra check:** after hold-UP, the setup portal must work at 12 MHz pclk (deployment depends on it). |
 | 4 Relative geometry | Not started | |
 | 5 Fonts | Not started | |
 | 6 Drawing code | Not started | |

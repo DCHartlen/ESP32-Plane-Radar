@@ -15,6 +15,7 @@
 #endif
 
 #include "config.h"
+#include "hardware/buttons.h"
 #include "services/radar_location.h"
 #include "ui/radar_range.h"
 #include "ui/status_screens.h"
@@ -33,6 +34,13 @@ void ensureWifiManager();
 void startLanWebPortal();
 void stopLanWebPortal();
 bool wifiLinkUp();
+
+/** Hold UP 3 s: wipe settings and reboot into the portal. Runs on the main task. */
+void pollResetButton() {
+  if (buttonsResetRequested()) {
+    wifiResetCredentialsAndReboot();
+  }
+}
 
 constexpr int kCoordParamLen = 20;
 constexpr char kCoordInputAttrs[] =
@@ -244,7 +252,7 @@ bool waitForLinkWithUi(const char* ssid_for_ui, unsigned long attempt_ms) {
     if (wifiLinkUp()) {
       return true;
     }
-    bootButtonPollLongPress();
+    pollResetButton();
     statusScreenConnectingTick();
     delay(config::kWifiConnectingFrameMs);
   }
@@ -322,7 +330,7 @@ bool openConfigPortal() {
   s_wm.setConfigPortalBlocking(false);
   s_wm.startConfigPortal(config::kPortalApName);
   while (s_wm.getConfigPortalActive()) {
-    bootButtonPollLongPress();
+    pollResetButton();
     if (s_wm.process()) {
       return true;
     }
@@ -346,15 +354,6 @@ bool wifiShowsSetupScreenOnBoot() {
   return pending;
 }
 
-// The C3's BOOT button (GPIO) is gone: on the Qualia GPIO0 is display line B4 and
-// must not be touched at runtime. These stay as no-ops until the expander buttons
-// (Phase 3) replace them.
-void bootButtonInit() {}
-
-bool bootButtonConsumeTap() { return false; }
-
-void bootButtonPollLongPress() {}
-
 void wifiResetCredentialsAndReboot() {
   resetWifiCredentials();
   statusScreenWifiReset();
@@ -374,12 +373,12 @@ void wifiLoop() {
       startLanWebPortal();
     }
     if (s_wm.getWebPortalActive() || s_wm.getConfigPortalActive()) {
-      bootButtonPollLongPress();
       s_wm.process();
     }
   } else {
     stopLanWebPortal();
   }
+  pollResetButton();
 }
 
 bool wifiSetupConnect() {
