@@ -34,7 +34,9 @@ pioarduino builds the merged `firmware.factory.bin` itself (bootloader, partitio
 - `ui/radar_theme.h` holds layout constants and colors. `ui/status_screens` draws the setup and connecting screens.
 - `hardware/lgfx_config.hpp` sets up the LovyanGFX panel and bus from `config.h`. `hardware/display_font` loads the anti-aliased VLW font that `board_build.embed_files` embeds (`data/ui_font.vlw`), with GFX fonts as a fallback.
 
-Lat/lon is projected to screen space with an equirectangular approximation: `dx = Δlon·kKmPerDeg·cos(center_lat)`, `dy = Δlat·kKmPerDeg`. It appears in both `radar_display.cpp` and `runway_overlay.cpp`, so keep the two in sync.
+Lat/lon is projected to screen space with an equirectangular approximation: `dx = Δlon·kKmPerDeg·cos(center_lat)`, `dy = Δlat·kKmPerDeg`. It lives in `ui/radar_geometry`, which both `radar_display.cpp` and `runway_overlay.cpp` use.
+
+Element sizes are written in pixels of the original 240 px design and scaled with `ui::px()` / `ui::pxF()` from `ui/ui_scale.h`. `kUiDensity` sets the overall size. Don't add raw pixel constants.
 
 ### Persistence (NVS via `Preferences`)
 

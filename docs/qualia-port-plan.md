@@ -220,6 +220,19 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 - If only the setup AP stays fragile: the runtime-pclk fallback in the Phase 3 notes (drop
   to 8 MHz while the portal is open).
 
+### Appearance tuning (later)
+
+- **Track line length:** ~3× the arrow length (60 s horizon at a fixed screen scale; same
+  ratio as the original). It reads long at 720 px. Tune `kAircraftTrackLengthScale` in
+  `ui/radar_theme.h`.
+- **Tag overlap:** in dense traffic (CYYZ departures) the three-line tags overlap each other
+  and nearby symbols. This is pre-existing behavior, made more visible by the larger text. It
+  needs a decluttering pass (for example, flip a tag to the other side or drop lines on collision).
+- **Heading vs track:** the arrow uses heading (true, else magnetic) and the line uses ground
+  track, so they differ by the crab angle, plus ~10° declination when only `mag_heading` is
+  reported. Option: draw the arrow along the track.
+- **Backlight** is bright. Dimming needs the PWM jumper (pin A1 / GPIO16).
+
 ## Things only the hardware can settle
 
 1. **Pixel clock and bounce buffers.** Tune them in Phase 2. The fallback is a lower clock.
@@ -237,7 +250,7 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 | 1 Build system | Done, verified on hardware | Builds on pioarduino 55.03.312-1 (core 3.3.12, IDF 5.5.5): 1.42 MB app, 28% RAM. esptool reports 8 MB PSRAM and 16 MB flash. |
 | 2 Display | Done, verified on hardware | **Hardware results (2026-10-01):** colors, R/G/B order and byte order correct; circles round, centered, edge fully visible; buttons active-low (`kButtonActiveLow`). Text is fuzzy because the old font is upscaled (fixed in Phase 5). **Pclk vs Wi-Fi:** at 12 MHz (~18 Hz refresh) dark shades flicker, green most. At 16 MHz the setup AP was unusable (phones got no IP, AP dropped) and STA can't connect at all (status 4, connect failed); at 8 MHz the portal works. At 12 MHz STA + HTTPS is clean (19/19 fetches, ~1 s each, full present ~75 ms). **Pclk is set to 12 MHz.** The flicker is thin-line/dim-shade shimmer from the low refresh, not aliasing. The setup AP at 12 MHz was verified in Phase 3. No jitter was reported during fetches (not checked closely). Options for going faster: Wi-Fi/lwIP buffers in internal RAM (`custom_sdkconfig`), PSRAM at 120 MHz, smaller porches, or dropping pclk while the portal is open. The C3 `setTxPower(8.5 dBm)` workaround was removed early (it crippled the AP). Diagnostics reverted (`WM_NODEBUG` back). The boot now waits up to 3 s for the USB monitor and prints the reset reason. Original notes: | `panel`, `display` (PSRAM `canvas`) and the `qualia_panel_test` env build. Starting values: pclk 12 MHz, 7200 px bounce buffer, rotation 0 (`kDisplayRotate180` flips the canvas). BOOT/GPIO0 handling is stubbed out until Phase 3. The radar still uses the 240 px layout (top-left of the screen) until Phase 4. Test: `pio run -e qualia_panel_test -t upload`, then check the five items above against the serial log. |
 | 3 Buttons | Done, verified on hardware | Taps, double tap, tap during fetch, hold-UP reset into the portal, and the setup portal at 12 MHz all work. The earlier weak, flaky AP was mostly a metallized anti-static bag under the board's antenna. **Keep metal away from the antenna end in the enclosure.** Fallback if the AP is flaky again: own the RGB panel through esp_lcd in `panel.cpp` (Arduino_GFX keeps only the init sequence) so pclk can drop to 8 MHz while the portal is open. Note: a reset wipes the location, and the portal pre-fills the Amsterdam default. | `hardware/buttons` task (core 0, 20 ms, 2-sample debounce, depth-4 queue). A press held over a reset is ignored until released, so the reboot can't loop. Range clamps (`rangeNext`/`rangePrev`) and saves to NVS 2 s after the last tap. Reset is checked in `wifiLoop` (so also during HTTP), the connect wait and the portal loop. **Extra check:** after hold-UP, the setup portal must work at 12 MHz pclk (deployment depends on it). |
-| 4 Relative geometry | Not started | |
+| 4 Relative geometry | Done, verified on hardware (density 0.67 kept; flicker acceptable at 12 MHz with the thicker lines). After hardware review: W/E inset by `kCardinalSideInsetPx`, aircraft symbol 1.5× (nose 12 / tail 4.5 / half-width 6 design px), rim dots inset by their radius. | `ui/ui_scale.h` has `kUiDensity` (0.67) and `ui::px()`/`pxF()`; the plan's `ui()` was renamed `px()` so it reads well inside `namespace ui`. Every theme and status-screen size is scaled. Rings use `fillArc`. `segmentIntersectsDisc` is 64-bit. Projection and clipping moved to `ui/radar_geometry`, with clipping steps cut from 5% to 1% (5% left visible gaps at 720 px). The VLW size search upper bound was raised from 1.2 to `kMaxVlwTextSize` (8.0), because labels need ~2× the embedded font. There was no red/blue swap left in `initPalette()`. Bitmap-font fallbacks are not scaled (Phase 5). |
 | 5 Fonts | Not started | |
 | 6 Drawing code | Not started | |
 | 7 Cleanup and docs | Not started | |

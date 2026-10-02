@@ -12,17 +12,20 @@
 #include "config.h"
 #include "hardware/display.h"
 #include "hardware/display_font.h"
+#include "ui/ui_scale.h"
 
 namespace {
 
-constexpr int kLineGap = 6;
-const int kCenterX = config::kDisplayWidth / 2;
-const int kCenterY = config::kDisplayHeight / 2;
+using ui::px;
+
+constexpr int kLineGap = px(6);
+constexpr int kCenterX = config::kDisplayWidth / 2;
+constexpr int kCenterY = config::kDisplayHeight / 2;
 
 constexpr int kSpinnerDotCount = 10;
-constexpr int kSpinnerRadius = 113;
-constexpr int kSpinnerDotRadius = 2;
-constexpr int kSpinnerEraseRadius = 4;
+constexpr int kSpinnerRadius = kCenterX - px(7);
+constexpr int kSpinnerDotRadius = px(2);
+constexpr int kSpinnerEraseRadius = px(4);
 constexpr float kSpinnerStepDeg = 6.0f;
 
 struct SpinnerDot {
@@ -33,7 +36,7 @@ struct SpinnerDot {
 
 char s_connecting_ssid[33];
 char s_ssid_line[33];
-constexpr int kConnectingTextMaxWidthPx = 220;
+constexpr int kConnectingTextMaxWidthPx = static_cast<int>(0.9f * config::kDisplayWidth);
 float s_spinner_angle_deg = -90.0f;
 SpinnerDot s_spinner_dots[kSpinnerDotCount];
 bool s_connecting_text_drawn = false;
@@ -48,23 +51,28 @@ constexpr auto& kConnectingGfxDetail = fonts::FreeSans9pt7b;
 
 struct TextLine {
   const char* text;
+  /** VLW text size on the original 240 px screen; scaled by ui::kElementScale. */
   float vlw_size;
   const lgfx::GFXfont* gfx_font;
 };
+
+void setVlwDesignSize(float design_size) {
+  displayFontSetSmoothSize(canvas, design_size * ui::kElementScale);
+}
 
 int lineHeightGfx(const lgfx::GFXfont* font) {
   displayFontSetBitmap(canvas, font);
   return canvas.fontHeight();
 }
 
-int lineHeightVlw(float size) {
-  displayFontSetSmoothSize(canvas, size);
+int lineHeightVlw(float design_size) {
+  setVlwDesignSize(design_size);
   return canvas.fontHeight();
 }
 
 void applyLineStyle(const TextLine& line) {
   if (displayFontIsSmooth()) {
-    displayFontSetSmoothSize(canvas, line.vlw_size);
+    setVlwDesignSize(line.vlw_size);
   } else {
     displayFontSetBitmap(canvas, line.gfx_font);
   }
@@ -103,7 +111,7 @@ constexpr float kConnectingDetailVlw = 0.92f;
 
 void applyConnectingDetailStyle() {
   if (displayFontIsSmooth()) {
-    displayFontSetSmoothSize(canvas, kConnectingDetailVlw);
+    setVlwDesignSize(kConnectingDetailVlw);
   } else {
     displayFontSetBitmap(canvas, &kConnectingGfxDetail);
   }
@@ -139,7 +147,7 @@ void drawConnectingText() {
   const int detail_h = canvas.fontHeight();
   const int total_h = detail_h * 2 + kLineGap;
   const int block_top = (config::kDisplayHeight - total_h) / 2;
-  constexpr int kPanelPadY = 8;
+  constexpr int kPanelPadY = px(8);
   canvas.fillRect(kCenterX - kConnectingTextMaxWidthPx / 2, block_top - kPanelPadY,
                kConnectingTextMaxWidthPx, total_h + kPanelPadY * 2, config::kColorBlack);
 

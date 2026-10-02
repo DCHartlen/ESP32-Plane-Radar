@@ -10,7 +10,7 @@
 #include "hardware/display.h"
 #include "hardware/display_font.h"
 #include "services/adsb_client.h"
-#include "services/radar_location.h"
+#include "ui/radar_geometry.h"
 #include "ui/radar_range.h"
 #include "ui/radar_theme.h"
 #include "ui/runway_overlay.h"
@@ -32,6 +32,11 @@ uint16_t kColorRunwayLabel = 0x7DFF;
 }  // namespace radar
 
 namespace {
+
+using radar::clipPointToOuterRing;
+using radar::distSqFromCenter;
+using radar::latLonToScreen;
+using radar::offsetKmFromCenter;
 
 bool s_label_metrics_ready = false;
 bool s_cardinal_use_vlw = false;
@@ -75,7 +80,7 @@ int measureVlwHeight(float size) {
 
 float findVlwSizeForHeight(int target_px) {
   float lo = 0.25f;
-  float hi = 1.2f;
+  float hi = radar::kMaxVlwTextSize;
   for (int i = 0; i < 16; ++i) {
     const float mid = (lo + hi) * 0.5f;
     if (measureVlwHeight(mid) < target_px) {
@@ -189,22 +194,6 @@ void initPalette() {
                                           radar::kRunwayLabelB);
 }
 
-constexpr float kKmPerDeg = 111.0f;
-constexpr float kDegToRad = 3.14159265f / 180.0f;
-
-void offsetKmFromCenter(float lat, float lon, float* dx_km, float* dy_km,
-                        float* dist_km) {
-  // Longitude degrees shrink toward the poles; scale by cos(latitude) so
-  // east-west distance isn't overstated away from the equator.
-  const float center_lat_rad =
-      static_cast<float>(services::location::lat()) * kDegToRad;
-  *dx_km = static_cast<float>(lon - services::location::lon()) * kKmPerDeg *
-           cosf(center_lat_rad);
-  *dy_km =
-      static_cast<float>(lat - services::location::lat()) * kKmPerDeg;
-  *dist_km = sqrtf((*dx_km) * (*dx_km) + (*dy_km) * (*dy_km));
-}
-
 float innerRingMaxKm() {
   const float outer_km = radar::rangeCurrent().outer_km;
   return outer_km * (static_cast<float>(radar::kGridOuterRadius -
@@ -212,27 +201,7 @@ float innerRingMaxKm() {
                      static_cast<float>(radar::kGridOuterRadius));
 }
 
-/** Flat lat/lon as x/y: 1° ≈ 111 km, north = screen up. */
-void latLonToScreen(float lat, float lon, int* out_x, int* out_y) {
-  const float outer_km = radar::rangeCurrent().outer_km;
-  const float px_per_km = static_cast<float>(radar::kGridOuterRadius) / outer_km;
-
-  float dx_km = 0.0f;
-  float dy_km = 0.0f;
-  float dist_km = 0.0f;
-  offsetKmFromCenter(lat, lon, &dx_km, &dy_km, &dist_km);
-
-  *out_x = radar::kCenterX + static_cast<int>(lroundf(dx_km * px_per_km));
-  *out_y = radar::kCenterY - static_cast<int>(lroundf(dy_km * px_per_km));
-}
-
 bool isInsideOuterRingKm(float dist_km) { return dist_km <= innerRingMaxKm(); }
-
-int distSqFromCenter(int x, int y) {
-  const int dx = x - radar::kCenterX;
-  const int dy = y - radar::kCenterY;
-  return dx * dx + dy * dy;
-}
 
 bool isInsideOuterRing(int x, int y) {
   const int max_r = radar::kGridOuterRadius - radar::kAircraftInsideRingInsetPx;
@@ -254,7 +223,9 @@ bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
 
   const int cx = radar::kCenterX;
   const int cy = radar::kCenterY;
-  const int rim_r = radar::kCenterX - radar::kBeyondRingScreenMarginPx;
+  // Inset by the dot radius too, so the whole dot stays inside the round screen.
+  const int rim_r = radar::kCenterX - radar::kBeyondRingScreenMarginPx -
+                    radar::kBeyondRingDotRadiusPx;
   const float angle_rad = atan2f(dx_km, dy_km);
 
   *out_x = cx + static_cast<int>(lroundf(sinf(angle_rad) * rim_r));
@@ -265,33 +236,6 @@ bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
 void drawBeyondRingDot(int x, int y) {
   s_draw->fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx,
                            radar::kColorAircraft);
-}
-
-void clipPointToOuterRing(int x0, int y0, int* x1, int* y1) {
-  const int max_r = radar::kGridOuterRadius;
-  const int max_r_sq = max_r * max_r;
-  if (distSqFromCenter(*x1, *y1) <= max_r_sq) {
-    return;
-  }
-
-  const int dx = *x1 - x0;
-  const int dy = *y1 - y0;
-  float t = 1.0f;
-  for (int step = 0; step < 20; ++step) {
-    const int px = x0 + static_cast<int>(lroundf(dx * t));
-    const int py = y0 + static_cast<int>(lroundf(dy * t));
-    if (distSqFromCenter(px, py) <= max_r_sq) {
-      *x1 = px;
-      *y1 = py;
-      return;
-    }
-    t -= 0.05f;
-    if (t <= 0.0f) {
-      *x1 = x0;
-      *y1 = y0;
-      return;
-    }
-  }
 }
 
 int speedLineLengthPx(float gs_knots) {
@@ -411,16 +355,17 @@ void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
   // West (left): tag toward center on the right; east (right): tag on the left.
   const bool tag_on_right = x < radar::kCenterX;
   int anchor_x = 0;
+  const int edge_pad = px(1);
   if (tag_on_right) {
     anchor_x = x + symbol_half + radar::kAircraftLabelGapPx;
-    anchor_x = std::min(anchor_x, radar::kSize - block_w - 1);
+    anchor_x = std::min(anchor_x, radar::kSize - block_w - edge_pad);
     s_draw->setTextDatum(textdatum_t::top_left);
   } else {
     anchor_x = x - symbol_half - radar::kAircraftLabelGapPx;
-    anchor_x = std::max(anchor_x, block_w + 1);
+    anchor_x = std::max(anchor_x, block_w + edge_pad);
     s_draw->setTextDatum(textdatum_t::top_right);
   }
-  ly = std::max(1, std::min(ly, radar::kSize - block_h - 1));
+  ly = std::max(edge_pad, std::min(ly, radar::kSize - block_h - edge_pad));
 
   if (plane.callsign[0] != '\0') {
     s_draw->setTextColor(radar::kColorLabel, radar::kColorBackground);
@@ -567,8 +512,8 @@ void drawScaleLabelWithBackground(const char* text, int x, int y) {
 
   const int tw = s_draw->textWidth(text);
   const int th = s_draw->fontHeight();
-  constexpr int kPadX = 3;
-  constexpr int kPadY = 2;
+  constexpr int kPadX = px(3);
+  constexpr int kPadY = px(2);
 
   const int left = x - tw - kPadX;
   const int top = y - th / 2 - kPadY;
@@ -583,11 +528,10 @@ void drawGridRing(int cx, int cy, int r, uint16_t color) {
   if (r <= 0) {
     return;
   }
+  // One filled annulus: stacked 1 px circles leave pinholes once the stroke is thick.
   const int thickness =
-      std::max(1, static_cast<int>(radar::kGridStrokeHalfWidth * 2.0f));
-  for (int i = 0; i < thickness && r - i > 0; ++i) {
-    s_draw->drawCircle(cx, cy, r - i, color);
-  }
+      std::max(1, static_cast<int>(lroundf(radar::kGridStrokeHalfWidth * 2.0f)));
+  s_draw->fillArc(cx, cy, std::max(0, r - thickness + 1), r, 0.0f, 360.0f, color);
 }
 
 void drawRings(int cx, int cy, int outer_radius) {
@@ -616,8 +560,8 @@ void drawCardinalLabels() {
   drawCardinalLabel("N", cx, radar::kCardinalNorthOffsetY, textdatum_t::top_center);
   drawCardinalLabel("S", cx, edge + radar::kCardinalSouthOffsetY,
                     textdatum_t::bottom_center);
-  drawCardinalLabel("W", 0, cy, textdatum_t::middle_left);
-  drawCardinalLabel("E", edge, cy, textdatum_t::middle_right);
+  drawCardinalLabel("W", radar::kCardinalSideInsetPx, cy, textdatum_t::middle_left);
+  drawCardinalLabel("E", edge - radar::kCardinalSideInsetPx, cy, textdatum_t::middle_right);
 }
 
 int scaleLabelAnchorX(int cx, int outer_radius) {
