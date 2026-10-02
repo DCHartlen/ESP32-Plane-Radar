@@ -1,7 +1,5 @@
 #include "ui/status_screens.h"
 
-#include <lgfx/v1/lgfx_fonts.hpp>
-
 #include <cmath>
 #include <cstdio>
 #include <cstddef>
@@ -10,76 +8,52 @@
 #include "config.h"
 #include "hardware/display.h"
 #include "hardware/display_font.h"
+#include "ui/ui_scale.h"
 
 namespace {
 
-constexpr int kLineGap = 6;
-const int kCenterX = config::kDisplayWidth / 2;
-const int kCenterY = config::kDisplayHeight / 2;
+using ui::px;
+
+constexpr int kLineGap = px(6);
+constexpr int kCenterX = config::kDisplayWidth / 2;
+constexpr int kCenterY = config::kDisplayHeight / 2;
 
 constexpr int kSpinnerDotCount = 10;
-constexpr int kSpinnerRadius = 113;
-constexpr int kSpinnerDotRadius = 2;
-constexpr int kSpinnerEraseRadius = 4;
+constexpr int kSpinnerRadius = kCenterX - px(7);
+constexpr int kSpinnerDotRadius = px(2);
 constexpr float kSpinnerStepDeg = 6.0f;
-
-struct SpinnerDot {
-  int x = 0;
-  int y = 0;
-  bool drawn = false;
-};
 
 char s_connecting_ssid[33];
 char s_ssid_line[33];
-constexpr int kConnectingTextMaxWidthPx = 220;
+constexpr int kConnectingTextMaxWidthPx = static_cast<int>(0.9f * config::kDisplayWidth);
 float s_spinner_angle_deg = -90.0f;
-SpinnerDot s_spinner_dots[kSpinnerDotCount];
-bool s_connecting_text_drawn = false;
 
-constexpr auto& kGfxTitle = fonts::FreeSans18pt7b;
-constexpr auto& kGfxBody = fonts::FreeSans12pt7b;
-constexpr auto& kGfxDetail = fonts::Font2;
-constexpr auto& kPortalGfxTitle = fonts::FreeSansBold18pt7b;
-constexpr auto& kPortalGfxBody = fonts::FreeSansBold12pt7b;
-constexpr auto& kPortalGfxEmphasis = fonts::FreeSansBold18pt7b;
-constexpr auto& kConnectingGfxDetail = fonts::FreeSans9pt7b;
+/** Line heights in design px (old 240 px screen); scaled with px(). */
+constexpr float kTitleHeight = 18.5f;
+constexpr float kEmphasisHeight = 18.0f;
+constexpr float kBodyHeight = 17.0f;
+constexpr float kNoteHeight = 16.0f;
+constexpr float kConnectingDetailHeight = 15.0f;
 
 struct TextLine {
   const char* text;
-  float vlw_size;
-  const lgfx::GFXfont* gfx_font;
+  float design_height;
 };
 
-int lineHeightGfx(const lgfx::GFXfont* font) {
-  displayFontSetBitmap(tft, font);
-  return tft.fontHeight();
-}
-
-int lineHeightVlw(float size) {
-  displayFontSetSmoothSize(tft, size);
-  return tft.fontHeight();
-}
-
-void applyLineStyle(const TextLine& line) {
-  if (displayFontIsSmooth()) {
-    displayFontSetSmoothSize(tft, line.vlw_size);
-  } else {
-    displayFontSetBitmap(tft, line.gfx_font);
-  }
+int applyLineStyle(const TextLine& line) {
+  const int h = px(line.design_height);
+  displayFontApply(canvas, h);
+  return h;
 }
 
 void drawTextBlock(uint16_t bg, uint16_t fg, const TextLine* lines, size_t count) {
-  tft.fillScreen(bg);
-  tft.setTextColor(fg, bg);
-  tft.setTextDatum(textdatum_t::middle_center);
+  canvas.fillScreen(bg);
+  canvas.setTextColor(fg, bg);
+  canvas.setTextDatum(textdatum_t::middle_center);
 
   int total_h = 0;
   for (size_t i = 0; i < count; ++i) {
-    if (displayFontIsSmooth()) {
-      total_h += lineHeightVlw(lines[i].vlw_size);
-    } else {
-      total_h += lineHeightGfx(lines[i].gfx_font);
-    }
+    total_h += px(lines[i].design_height);
     if (i + 1 < count) {
       total_h += kLineGap;
     }
@@ -87,23 +61,15 @@ void drawTextBlock(uint16_t bg, uint16_t fg, const TextLine* lines, size_t count
 
   int y = (config::kDisplayHeight - total_h) / 2;
   for (size_t i = 0; i < count; ++i) {
-    applyLineStyle(lines[i]);
-    const int h =
-        displayFontIsSmooth() ? lineHeightVlw(lines[i].vlw_size)
-                              : lineHeightGfx(lines[i].gfx_font);
-    tft.drawString(lines[i].text, kCenterX, y + h / 2);
+    const int h = applyLineStyle(lines[i]);
+    canvas.drawString(lines[i].text, kCenterX, y + h / 2);
     y += h + kLineGap;
   }
+  displayPresent();
 }
 
-constexpr float kConnectingDetailVlw = 0.92f;
-
 void applyConnectingDetailStyle() {
-  if (displayFontIsSmooth()) {
-    displayFontSetSmoothSize(tft, kConnectingDetailVlw);
-  } else {
-    displayFontSetBitmap(tft, &kConnectingGfxDetail);
-  }
+  displayFontApply(canvas, px(kConnectingDetailHeight));
 }
 
 /** SSID on one line; truncate with … if wider than kConnectingTextMaxWidthPx. */
@@ -111,14 +77,14 @@ void fitSsidLine() {
   strncpy(s_ssid_line, s_connecting_ssid, sizeof(s_ssid_line) - 1);
   s_ssid_line[sizeof(s_ssid_line) - 1] = '\0';
   applyConnectingDetailStyle();
-  if (tft.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
+  if (canvas.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
     return;
   }
   const size_t len = strlen(s_connecting_ssid);
   for (size_t n = len; n > 0; --n) {
     snprintf(s_ssid_line, sizeof(s_ssid_line), "%.*s…", static_cast<int>(n),
              s_connecting_ssid);
-    if (tft.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
+    if (canvas.textWidth(s_ssid_line) <= kConnectingTextMaxWidthPx) {
       return;
     }
   }
@@ -127,36 +93,16 @@ void fitSsidLine() {
 }
 
 void drawConnectingText() {
-  tft.fillScreen(config::kColorBlack);
-
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setTextColor(config::kTextOnBlack, config::kColorBlack);
+  canvas.setTextDatum(textdatum_t::middle_center);
+  canvas.setTextColor(config::kTextOnBlack, config::kColorBlack);
 
   applyConnectingDetailStyle();
-  const int detail_h = tft.fontHeight();
+  const int detail_h = canvas.fontHeight();
   const int total_h = detail_h * 2 + kLineGap;
-  const int block_top = (config::kDisplayHeight - total_h) / 2;
-  constexpr int kPanelPadY = 8;
-  tft.fillRect(kCenterX - kConnectingTextMaxWidthPx / 2, block_top - kPanelPadY,
-               kConnectingTextMaxWidthPx, total_h + kPanelPadY * 2, config::kColorBlack);
-
-  int y = block_top;
-  tft.drawString("Connecting to", kCenterX, y + detail_h / 2);
+  int y = (config::kDisplayHeight - total_h) / 2;
+  canvas.drawString("Connecting to", kCenterX, y + detail_h / 2);
   y += detail_h + kLineGap;
-  tft.drawString(s_ssid_line, kCenterX, y + detail_h / 2);
-
-  s_connecting_text_drawn = true;
-}
-
-void eraseSpinnerDots() {
-  for (int i = 0; i < kSpinnerDotCount; ++i) {
-    if (!s_spinner_dots[i].drawn) {
-      continue;
-    }
-    tft.fillCircle(s_spinner_dots[i].x, s_spinner_dots[i].y, kSpinnerEraseRadius,
-                   config::kColorBlack);
-    s_spinner_dots[i].drawn = false;
-  }
+  canvas.drawString(s_ssid_line, kCenterX, y + detail_h / 2);
 }
 
 void drawSpinnerDots() {
@@ -169,13 +115,17 @@ void drawSpinnerDots() {
     const int y = kCenterY + static_cast<int>(std::lround(std::sin(a) * kSpinnerRadius));
 
     const int fade = 255 - i * 22;
-    const uint16_t color = tft.color565(0, fade, 0);
-    tft.fillSmoothCircle(x, y, kSpinnerDotRadius, color);
-
-    s_spinner_dots[i].x = x;
-    s_spinner_dots[i].y = y;
-    s_spinner_dots[i].drawn = true;
+    const uint16_t color = canvas.color565(0, fade, 0);
+    canvas.fillSmoothCircle(x, y, kSpinnerDotRadius, color);
   }
+}
+
+/** The whole screen every tick: the back buffer holds the frame before last. */
+void drawConnectingScreen() {
+  canvas.fillScreen(config::kColorBlack);
+  drawConnectingText();
+  drawSpinnerDots();
+  displayPresent();
 }
 
 }  // namespace
@@ -186,34 +136,25 @@ void statusScreenConnectingBegin(const char* ssid) {
   s_connecting_ssid[sizeof(s_connecting_ssid) - 1] = '\0';
   fitSsidLine();
   s_spinner_angle_deg = -90.0f;
-  for (auto& dot : s_spinner_dots) {
-    dot.drawn = false;
-  }
-  s_connecting_text_drawn = false;
-  drawConnectingText();
-  drawSpinnerDots();
+  drawConnectingScreen();
 }
 
 void statusScreenConnectingTick() {
-  if (!s_connecting_text_drawn) {
-    drawConnectingText();
-  }
-  eraseSpinnerDots();
   s_spinner_angle_deg += kSpinnerStepDeg;
   if (s_spinner_angle_deg >= 270.0f) {
     s_spinner_angle_deg -= 360.0f;
   }
-  drawSpinnerDots();
+  drawConnectingScreen();
 }
 
 void statusScreenPortal() {
   const TextLine lines[] = {
-      {"Wi-Fi setup", 1.15f, &kPortalGfxTitle},
-      {"1. Join network:", 1.05f, &kPortalGfxBody},
-      {config::kPortalApName, 1.12f, &kPortalGfxEmphasis},
-      {"2. Open in browser:", 1.05f, &kPortalGfxBody},
-      {config::kPortalHostUrl, 1.12f, &kPortalGfxEmphasis},
-      {"or 192.168.4.1", 1.0f, &kPortalGfxBody},
+      {"Wi-Fi setup", kTitleHeight},
+      {"1. Join network:", kBodyHeight},
+      {config::kPortalApName, kEmphasisHeight},
+      {"2. Open in browser:", kBodyHeight},
+      {config::kPortalHostUrl, kEmphasisHeight},
+      {"or 192.168.4.1", kNoteHeight},
   };
   drawTextBlock(config::kColorYellow, config::kTextOnYellow, lines,
                 sizeof(lines) / sizeof(lines[0]));
@@ -221,11 +162,11 @@ void statusScreenPortal() {
 
 void statusScreenConnectFailed() {
   const TextLine lines[] = {
-      {"Could not connect", 1.15f, &kGfxTitle},
-      {"Check Wi-Fi password", 1.0f, &kGfxBody},
-      {"and signal strength.", 1.0f, &kGfxBody},
-      {"Hold BOOT 3 sec", 1.0f, &kGfxBody},
-      {"to reset Wi-Fi", 1.0f, &kGfxBody},
+      {"Could not connect", kTitleHeight},
+      {"Check Wi-Fi password", kNoteHeight},
+      {"and signal strength.", kNoteHeight},
+      {"Hold UP 3 sec", kNoteHeight},
+      {"to reset Wi-Fi", kNoteHeight},
   };
   drawTextBlock(config::kColorYellow, config::kTextOnYellow, lines,
                 sizeof(lines) / sizeof(lines[0]));
@@ -233,8 +174,8 @@ void statusScreenConnectFailed() {
 
 void statusScreenWifiReset() {
   const TextLine lines[] = {
-      {"Wi-Fi reset", 1.15f, &kPortalGfxTitle},
-      {"Restarting...", 1.05f, &kPortalGfxBody},
+      {"Wi-Fi reset", kTitleHeight},
+      {"Restarting...", kBodyHeight},
   };
   drawTextBlock(config::kColorYellow, config::kTextOnYellow, lines,
                 sizeof(lines) / sizeof(lines[0]));

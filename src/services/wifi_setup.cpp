@@ -15,43 +15,10 @@
 #endif
 
 #include "config.h"
+#include "hardware/buttons.h"
 #include "services/radar_location.h"
 #include "ui/radar_range.h"
 #include "ui/status_screens.h"
-
-portMUX_TYPE s_boot_mux = portMUX_INITIALIZER_UNLOCKED;
-volatile bool s_boot_tap_pending = false;
-volatile bool s_boot_is_down = false;
-volatile unsigned long s_boot_down_ms = 0;
-bool s_long_press_handled = false;
-bool s_boot_interrupt_attached = false;
-
-void IRAM_ATTR onBootButtonIsr() {
-  const bool down = digitalRead(config::kBootPin) == LOW;
-  const unsigned long now = millis();
-  portENTER_CRITICAL_ISR(&s_boot_mux);
-  if (down) {
-    s_boot_is_down = true;
-    s_boot_down_ms = now;
-  } else if (s_boot_is_down) {
-    const unsigned long held = now - s_boot_down_ms;
-    if (held >= config::kBootTapMinMs && held < config::kBootResetHoldMs) {
-      s_boot_tap_pending = true;
-    }
-    s_boot_is_down = false;
-  }
-  portEXIT_CRITICAL_ISR(&s_boot_mux);
-}
-
-void initBootButton() {
-  pinMode(config::kBootPin, INPUT_PULLUP);
-  if (s_boot_interrupt_attached) {
-    return;
-  }
-  attachInterrupt(digitalPinToInterrupt(static_cast<uint8_t>(config::kBootPin)),
-                  onBootButtonIsr, CHANGE);
-  s_boot_interrupt_attached = true;
-}
 
 namespace {
 
@@ -67,6 +34,13 @@ void ensureWifiManager();
 void startLanWebPortal();
 void stopLanWebPortal();
 bool wifiLinkUp();
+
+/** Hold UP 3 s: wipe settings and reboot into the portal. Runs on the main task. */
+void pollResetButton() {
+  if (buttonsResetRequested()) {
+    wifiResetCredentialsAndReboot();
+  }
+}
 
 constexpr int kCoordParamLen = 20;
 constexpr char kCoordInputAttrs[] =
@@ -181,7 +155,9 @@ void eraseWifiCredentials() {
   s_wm.resetSettings();
   s_wm.erase();
   WiFi.disconnect(true, true);
-  WiFi.persistent(false);
+  // Back to the core default. Storage is picked each time Wi-Fi starts: false here would
+  // keep the credentials entered in the portal after a reset in RAM only, lost on reboot.
+  WiFi.persistent(true);
 
   WiFi.mode(WIFI_OFF);
   delay(100);
@@ -196,7 +172,6 @@ void resetWifiCredentials() {
 }
 
 void onConfigPortalApStarted(WiFiManager*) {
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   statusScreenPortal();
 #ifdef WM_MDNS
   if (MDNS.begin(config::kPortalHostname)) {
@@ -259,7 +234,6 @@ void stopLanWebPortal() {
 }
 
 void prepareSta() {
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(WIFI_PS_NONE);
   WiFi.setAutoReconnect(true);
@@ -280,7 +254,7 @@ bool waitForLinkWithUi(const char* ssid_for_ui, unsigned long attempt_ms) {
     if (wifiLinkUp()) {
       return true;
     }
-    bootButtonPollLongPress();
+    pollResetButton();
     statusScreenConnectingTick();
     delay(config::kWifiConnectingFrameMs);
   }
@@ -358,7 +332,7 @@ bool openConfigPortal() {
   s_wm.setConfigPortalBlocking(false);
   s_wm.startConfigPortal(config::kPortalApName);
   while (s_wm.getConfigPortalActive()) {
-    bootButtonPollLongPress();
+    pollResetButton();
     if (s_wm.process()) {
       return true;
     }
@@ -382,46 +356,6 @@ bool wifiShowsSetupScreenOnBoot() {
   return pending;
 }
 
-bool wifiBootButtonPressed() {
-  return digitalRead(config::kBootPin) == LOW;
-}
-
-void bootButtonInit() { initBootButton(); }
-
-bool bootButtonConsumeTap() {
-  portENTER_CRITICAL(&s_boot_mux);
-  const bool tap = s_boot_tap_pending;
-  if (tap) {
-    s_boot_tap_pending = false;
-  }
-  portEXIT_CRITICAL(&s_boot_mux);
-  return tap;
-}
-
-void bootButtonPollLongPress() {
-  if (wifiBootButtonPressed()) {
-    portENTER_CRITICAL(&s_boot_mux);
-    if (!s_boot_is_down) {
-      s_boot_is_down = true;
-      s_boot_down_ms = millis();
-    }
-    const unsigned long down_ms = s_boot_down_ms;
-    portEXIT_CRITICAL(&s_boot_mux);
-
-    if (!s_long_press_handled &&
-        millis() - down_ms >= config::kBootResetHoldMs) {
-      s_long_press_handled = true;
-      Serial.println("BOOT held — resetting WiFi");
-      wifiResetCredentialsAndReboot();
-    }
-  } else {
-    portENTER_CRITICAL(&s_boot_mux);
-    s_boot_is_down = false;
-    portEXIT_CRITICAL(&s_boot_mux);
-    s_long_press_handled = false;
-  }
-}
-
 void wifiResetCredentialsAndReboot() {
   resetWifiCredentials();
   statusScreenWifiReset();
@@ -430,7 +364,6 @@ void wifiResetCredentialsAndReboot() {
 }
 
 bool wifiReconnect() {
-  initBootButton();
   Serial.println("WiFi reconnecting...");
   return connectSavedNetwork(true);
 }
@@ -442,16 +375,15 @@ void wifiLoop() {
       startLanWebPortal();
     }
     if (s_wm.getWebPortalActive() || s_wm.getConfigPortalActive()) {
-      bootButtonPollLongPress();
       s_wm.process();
     }
   } else {
     stopLanWebPortal();
   }
+  pollResetButton();
 }
 
 bool wifiSetupConnect() {
-  initBootButton();
   ensureWifiManager();
 
   const bool force_portal = consumeForceConfigPortal();

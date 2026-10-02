@@ -1,12 +1,15 @@
 /**
- * Plane Radar — WiFi setup, then radar UI on the round GC9A01 display.
+ * Plane Radar — WiFi setup, then radar UI on the Qualia's round 720×720 panel.
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 #include "config.h"
+#include "hardware/buttons.h"
 #include "hardware/display.h"
+#include "hardware/panel_test.h"
 #include "services/adsb_client.h"
 #include "services/radar_location.h"
 #include "services/wifi_setup.h"
@@ -30,8 +33,18 @@ void showRadarIfConnected() {
   g_radar_visible = true;
 }
 
-void onRangeTap() {
-  ui::radar::rangeNext();
+/** UP = zoom out, DOWN = zoom in. Drains every queued tap, then redraws once. */
+void handleButtons() {
+  bool changed = false;
+  for (ButtonEvent event = buttonsConsumeEvent(); event != ButtonEvent::None;
+       event = buttonsConsumeEvent()) {
+    changed |= (event == ButtonEvent::Up) ? ui::radar::rangeNext() : ui::radar::rangePrev();
+  }
+  ui::radar::rangeSaveIfDue();
+  if (!changed) {
+    return;
+  }
+
   char range_label[12];
   ui::radar::formatCurrentRing3Label(range_label, sizeof(range_label));
   Serial.printf("Range: %s (outer ~%.0f km)\n", range_label,
@@ -42,34 +55,45 @@ void onRangeTap() {
   }
 }
 
-void handleBootButton() {
-  bootButtonPollLongPress();
-  if (bootButtonConsumeTap()) {
-    onRangeTap();
-  }
-}
-
 void fetchAndDrawAircraft() {
   const float fetch_km = ui::radar::fetchRadiusKm();
-  if (!services::adsb::fetchUpdate(services::location::lat(),
-                                   services::location::lon(), fetch_km)) {
-    handleBootButton();
-    return;
-  }
+  // Redraw on failure too, so stale aircraft are replaced by the error once they expire.
+  services::adsb::fetchUpdate(services::location::lat(), services::location::lon(),
+                              fetch_km);
   ui::radarDisplayRefreshAircraft();
-  handleBootButton();
+  // Internal RAM headroom (bounce buffers and TLS both come from it).
+  Serial.printf("Heap internal: free %u KB, min ever %u KB, largest block %u KB\n",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024,
+                heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024,
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
+  handleButtons();
 }
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  // USB CDC re-enumerates on every reset; give the monitor up to 3 s to reattach.
+  while (!Serial && millis() < 3000) {
+    delay(10);
+  }
   Serial.println();
   Serial.println("Plane Radar");
+  Serial.printf("Reset reason: %d\n", static_cast<int>(esp_reset_reason()));
+  Serial.printf("Flash %u MB, PSRAM %u KB (free %u KB)\n",
+                static_cast<unsigned>(ESP.getFlashChipSize() / (1024 * 1024)),
+                static_cast<unsigned>(ESP.getPsramSize() / 1024),
+                static_cast<unsigned>(ESP.getFreePsram() / 1024));
 
-  bootButtonInit();
   displayInit();
+  // Wi-Fi's first connect writes to flash, which can stall the panel refill and leave the
+  // image shifted up. Re-align the scan-out once the link is up.
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { displayResync(); },
+               ARDUINO_EVENT_WIFI_STA_GOT_IP);
+#ifdef PANEL_TEST
+  panelTestRun();
+#endif
+  buttonsInit();
   if (wifiShowsSetupScreenOnBoot()) {
     statusScreenPortal();
   }
@@ -83,13 +107,15 @@ void setup() {
 }
 
 void loop() {
-  handleBootButton();
+  handleButtons();
   wifiLoop();
 
   if (WiFi.status() != WL_CONNECTED) {
     if (g_radar_visible) {
       Serial.println("WiFi lost — will reconnect");
       g_radar_visible = false;
+      // Don't bring the old aircraft back when the radar returns.
+      services::adsb::invalidate();
     }
 
     if (g_wifi_down_since == 0) {

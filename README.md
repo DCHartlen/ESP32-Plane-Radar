@@ -1,41 +1,55 @@
 # Plane Radar
 
-<img width="800" height="450" alt="plane-radar" src="https://github.com/user-attachments/assets/716d0992-dab8-47ba-8f1a-2aec7f607419" />
+Firmware for an **Adafruit Qualia ESP32-S3 for TTL RGB-666** driving a **4″ round 720×720 IPS display** (NV3052C). Shows a circular **ADS-B radar** around your configured location, with **WiFiManager** for first-time setup.
 
-**3D printed case (STL + assembly):** [MakerWorld](https://makerworld.com/en/models/2872376-esp32-plane-radar-live-ads-b-on-a-round-display#profileId-3207083) · **Firmware:** [Releases](https://github.com/MatixYo/ESP32-Plane-Radar/releases)
+Based on [MatixYo/ESP32-Plane-Radar](https://github.com/MatixYo/ESP32-Plane-Radar), which targets an ESP32-C3 Super Mini with a 1.28″ GC9A01 display (and has a [3D printed case](https://makerworld.com/en/models/2872376-esp32-plane-radar-live-ads-b-on-a-round-display#profileId-3207083) for that build). This fork replaces that hardware entirely. **Firmware:** [Releases](https://github.com/DCHartlen/ESP32-Plane-Radar/releases)
 
-Firmware for an **ESP32-C3 Super Mini** and a **1.28″ round GC9A01** display (240×240). Shows a circular **ADS-B radar** around your configured location, with **WiFiManager** for first-time setup.
+<img width="800" height="450" alt="plane-radar (original 1.28″ build)" src="https://github.com/user-attachments/assets/716d0992-dab8-47ba-8f1a-2aec7f607419" />
+
+## Hardware
+
+| Part | Notes |
+|------|-------|
+| [Adafruit Qualia ESP32-S3 for TTL RGB-666 displays](https://www.adafruit.com/search?q=qualia) | ESP32-S3 N16R8: 16 MB flash, 8 MB octal PSRAM |
+| 4″ round 720×720 IPS panel, 40-pin RGB, NV3052C driver, no touch | Treated as Adafruit's **HD40015C40** (same init sequence and timings) |
+
+The panel plugs straight into the Qualia's 40-pin connector, so there's no wiring. Power and flashing are over the Qualia's USB-C.
+
+- **Keep metal away from the antenna end** of the board (including metallized anti-static bags and enclosure parts). It made the setup access point unusable during testing.
+- The backlight is on/off only. Dimming needs the Qualia's PWM jumper soldered (pin A1 / GPIO16) and isn't implemented.
+- GPIO0 (BOOT) is a display data line on this board, so it isn't used as a button.
 
 ## What it does
 
-1. **Wi‑Fi setup** (if needed) — captive portal on AP **`PlaneRadar-Setup`**
-2. **Radar** — live aircraft from [adsb.fi](https://opendata.adsb.fi/) on a sonar-style grid
+1. **Wi‑Fi setup** (if needed): captive portal on AP **`PlaneRadar-Setup`**
+2. **Radar**: live aircraft from [adsb.fi](https://opendata.adsb.fi/) on a sonar-style grid, refreshed every 5 s
 
-After Wi‑Fi is saved, the device reconnects automatically; the radar runs in the main loop with periodic ADS-B updates (~5 s).
+After Wi‑Fi is saved, the device reconnects automatically. If Wi‑Fi drops, it shows a "Connecting" screen and keeps retrying. It never reopens the setup portal on its own.
 
-## Controls (BOOT, GPIO 9, active LOW)
+## Controls (Qualia UP / DOWN buttons)
 
 | Action | Effect |
 |--------|--------|
-| **Short tap** | Cycle range preset (5 → 10 → 15 → 25 km); saved to flash |
-| **Hold 3 s** | Clear Wi‑Fi, location, and units; reboot into setup portal |
+| **UP** tap | Zoom out to the next range preset (stops at 25 km) |
+| **DOWN** tap | Zoom in to the previous range preset (stops at 5 km) |
+| **Hold UP 3 s** | Clear Wi‑Fi, location and units; reboot into the setup portal |
 
-During setup you can also hold BOOT at power-on to force a credential reset (same as the long press).
+Taps register even while a fetch or redraw is in progress. The range is saved to flash 2 s after the last tap. Hold UP works on every screen, including setup and connecting.
 
 ## Wi‑Fi setup portal
 
 **First-time setup** (no saved Wi‑Fi):
 
 1. Connect to **`PlaneRadar-Setup`**
-2. Open **`http://plane-radar.local`** (preferred) or **`http://192.168.4.1`** — both are shown on the yellow setup screen; captive portal may open automatically
-3. Set home Wi‑Fi, then save
+2. Open **`http://plane-radar.local`** (preferred) or **`http://192.168.4.1`**. Both are shown on the yellow setup screen, and the captive portal may open automatically.
+3. Set home Wi‑Fi and your location, then save
 
 **Reconfigure anytime** (after the device is on your network):
 
-1. Open **`http://plane-radar.local`** or **`http://<device-ip>`** (e.g. from your router or serial log at boot)
+1. Open **`http://plane-radar.local`** or **`http://<device-ip>`** (from your router, or the serial log at boot)
 2. Change Wi‑Fi, location, units, or runway overlay; save
 
-The same portal runs on the setup AP and on the device’s LAN IP while connected to Wi‑Fi. mDNS hostname is `plane-radar` → **plane-radar.local** (`kPortalHostname` in `config.h`). Some clients resolve `.local` slowly; use the IP if needed.
+The same portal runs on the setup AP and on the device's LAN IP while connected to Wi‑Fi. The mDNS hostname is `plane-radar` → **plane-radar.local** (`kPortalHostname` in `config.h`). Some clients resolve `.local` slowly, so use the IP if needed.
 
 **Custom fields** (stored in NVS):
 
@@ -45,7 +59,7 @@ The same portal runs on the setup AP and on the device’s LAN IP while connecte
 | **Display distances in miles** | Ring scale label in **mi** instead of **km** (e.g. `6mi` vs `10km`) |
 | **Show airport runways** | Major-airport runway overlay on the radar (off to hide) |
 
-After a reset, the device reboots and shows the setup screen immediately (no “Connecting” loop on stale credentials).
+A reset clears the location too, and the portal then pre-fills the default (Amsterdam), so re-enter yours.
 
 ## Radar display
 
@@ -55,7 +69,7 @@ After a reset, the device reboots and shows the setup screen immediately (no “
 - White **N / S / E / W** at the bezel; range label on the **east** spoke (ring 3 = ¾ of outer radius)
 - White center dot
 
-Layout and colors: `include/ui/radar_theme.h`.
+Layout and colors: `include/ui/radar_theme.h`. Element sizes are written in pixels of the original 240 px design and scaled to the 720 px screen; `kUiDensity` in `include/ui/ui_scale.h` sets the overall size (0.67 ≈ twice the original's physical size).
 
 ### Range presets
 
@@ -76,16 +90,34 @@ Preset and miles/km choice persist across reboot (`planeradar` NVS namespace).
 
 ### Aircraft
 
-- **Inside the outer ring** — red heading triangle, magenta speed vector (clipped at the ring), callsign / type / altitude tags
-- **Outside the ring** (still within ADS-B fetch) — small **red dot on the screen rim** at the correct bearing (direction cue; not distance-accurate past the ring)
-- **Tags** — placed toward the **center**: west (left) → tag on the **right** of the symbol; east (right) → tag on the **left**
+- **Inside the outer ring**: red heading triangle, magenta track line showing where the aircraft will be in 30 s (clipped at the ring), callsign / type / altitude tags
+- **Outside the ring** (still within the ADS-B fetch): small **red dot on the screen rim** at the correct bearing (a direction cue, not distance-accurate past the ring)
+- **Tags** are placed toward the **center**: west (left) → tag on the **right** of the symbol; east (right) → tag on the **left**
 
-As range decreases (or aircraft approach), targets move inward; beyond-ring dots become full symbols when they cross the outer ring.
+As range decreases (or aircraft approach), targets move inward; rim dots become full symbols when they cross the outer ring.
+
+### When data is missing
+
+If there's been no successful fetch for 30 s (`kAdsbStaleAfterMs`), or Wi‑Fi has just reconnected, aircraft are hidden so old positions aren't shown as live. A message between the first and second rings says why:
+
+| Message | Meaning |
+|---------|---------|
+| Waiting for data | Just booted or reconnected |
+| No internet | Couldn't connect to adsb.fi (no internet, DNS or TLS failure) |
+| adsb.fi not responding | Connected, but no reply within 10 s |
+| Connection lost | The connection dropped mid-request |
+| adsb.fi rate limit | HTTP 429 |
+| adsb.fi unavailable | HTTP 5xx |
+| adsb.fi error | Any other HTTP status |
+| Bad data from adsb.fi | Empty or invalid JSON, or an API error message |
+| Data out of date | The last fetch succeeded, but more than 30 s ago |
+
+A single failed fetch doesn't trigger a message.
 
 ### ADS-B
 
-- Source: `https://opendata.adsb.fi/api/v3/`
-- Fetch radius: `ui::radar::fetchRadiusKm()` — scales with the active preset to roughly the screen edge (so rim dots have data)
+- Source: `https://opendata.adsb.fi/api/v3/` (public limit: 1 request/s)
+- Fetch radius: `ui::radar::fetchRadiusKm()` scales with the active preset to roughly the screen edge (so rim dots have data)
 - Poll interval: `kAdsbFetchIntervalMs` (5 s) in `config.h`
 - Ground aircraft hidden by default (`kAdsbShowGroundAircraft`)
 
@@ -96,11 +128,11 @@ Edit **`include/config.h`** for hardware and behavior:
 | Area | Keys / notes |
 |------|----------------|
 | Portal | `kPortalApName`, `kPortalIp`, `kPortalHostname` / `kPortalHostUrl` (mDNS; needs `-DWM_MDNS` in `platformio.ini`) |
-| Wi‑Fi timing | connect attempts, reconnect grace, portal timeout (`0` = no timeout) |
-| BOOT | `kBootPin`, `kBootResetHoldMs`, `kBootTapMinMs` |
-| Display SPI | pins, `kDisplayInvert`, `kDisplayRgbOrder`, `kDisplaySpiWriteHz` |
-| Default location | `kDefaultRadarLat`, `kDefaultRadarLon` (until portal overrides) |
-| ADS-B | `kAdsbFetchIntervalMs`, `kAdsbShowGroundAircraft` |
+| Wi‑Fi timing | Connect attempts, reconnect grace and interval, portal timeout (`0` = no timeout) |
+| Buttons | `kResetHoldMs`, `kButtonPollMs`, `kRangeSaveDelayMs`, expander pins, `kButtonActiveLow` |
+| Display | RGB pins, panel timings, `kPanelPclkHz` (16 MHz; needs the 36-line bounce buffer, see `docs/qualia-port-plan.md`), `kPanelBounceBufferPx`, `kDisplayRotate180` |
+| Default location | `kDefaultRadarLat`, `kDefaultRadarLon` (until the portal overrides them) |
+| ADS-B | `kAdsbFetchIntervalMs`, `kAdsbStaleAfterMs`, `kAdsbShowGroundAircraft` |
 
 Range presets: `include/ui/radar_range.h` (`kRangePresets`).
 
@@ -110,13 +142,17 @@ Range presets: `include/ui/radar_range.h` (`kRangePresets`).
 include/
   config.h
   hardware/
-    lgfx_config.hpp
-    display.h
+    panel.h               — Arduino_GFX RGB panel + PCA9554 expander (only user of Arduino_GFX)
+    display.h             — 720×720 PSRAM canvas (LovyanGFX), present to the panel
     display_font.h
+    buttons.h             — UP/DOWN polling task
+    panel_test.h          — hardware bring-up test (qualia_panel_test env)
   data/
     large_airports.h
   ui/
+    ui_scale.h
     radar_theme.h
+    radar_geometry.h
     radar_range.h
     radar_display.h
     runway_overlay.h
@@ -126,9 +162,16 @@ include/
     radar_location.h
     adsb_client.h
 data/
-  ui_font.vlw              — embedded smooth UI font (Noto Sans Bold)
+  ui_font_small.vlw       — embedded smooth UI fonts (generated)
+  ui_font_large.vlw
+fonts/
+  NotoSans-Bold.ttf       — source font for the VLW files (OFL.txt)
+partitions/
+  plane_radar.csv         — 16 MB: two OTA slots around the TinyUF2 slot
 scripts/
   build_large_airports.py
+  build_vlw_font.py
+  merge-firmware.sh
 src/
   main.cpp
   data/
@@ -138,60 +181,38 @@ src/
   services/
 ```
 
-## Wiring (GC9A01 ↔ ESP32-C3 Super Mini)
-
-| Display | ESP32-C3 |
-|---------|----------|
-| VCC | 3V3 |
-| GND | GND |
-| RST | GPIO **0** |
-| CS | GPIO **1** |
-| DC | GPIO **10** |
-| SDA (MOSI) | GPIO **3** |
-| SCL (SCLK) | GPIO **4** |
-| BOOT (user) | GPIO **9** |
-
 ## Build
 
 ```bash
-pio run -t upload
+pio run -e qualia -t upload
 pio device monitor
 ```
 
-- PlatformIO env: **`supermini`**
-- Serial: **115200** baud
-- USB CDC on boot enabled in `platformio.ini` for the Super Mini
+- PlatformIO env: **`qualia`**, on the pinned [pioarduino](https://github.com/pioarduino/platform-espressif32) platform (Arduino core 3.x / ESP-IDF 5)
+- Serial: **115200** baud (USB CDC; the boot waits up to 3 s for a monitor)
+- If upload can't find the port, put the board in download mode: hold **BOOT**, tap **RESET**, release BOOT
+- On Windows, run `pio` from PowerShell or cmd, not Git Bash (ESP-IDF's tool installer refuses MSys)
+
+`qualia_panel_test` is a separate env for hardware bring-up: color bars, circles, text, looped HTTPS and button levels (`pio run -e qualia_panel_test -t upload`).
 
 ### Web-flashable release image
 
-Single `.bin` for [esptool-js](https://espressif.github.io/esptool-js/) and similar tools (ESP32-C3, 4 MB, flash at **0x0**):
+Every build writes a single image, `.pio/build/qualia/firmware.factory.bin` (bootloader, partitions, boot_app0, the board's TinyUF2 and the app), for [esptool-js](https://espressif.github.io/esptool-js/) and similar tools. To copy it to `release/`:
 
 ```bash
-chmod +x scripts/merge-firmware.sh   # once
-./scripts/merge-firmware.sh
+./scripts/merge-firmware.sh             # builds, then writes release/plane-radar-merged.bin
+./scripts/merge-firmware.sh --no-build  # copy only
 ```
 
-Writes `release/plane-radar-merged.bin`. Skip rebuild if firmware is already built:
-
-```bash
-./scripts/merge-firmware.sh --no-build
-```
-
-Or via PlatformIO only (output: `.pio/build/supermini/firmware-merged.bin`):
-
-```bash
-pio run -e supermini
-pio run -t merge -e supermini
-```
-
-Put the board in download mode (hold **BOOT**, tap **RESET**), then flash with Chrome/Edge over USB.
+Flash it at **0x0** (ESP32-S3, 16 MB). Put the board in download mode (hold **BOOT**, tap **RESET**), then flash with Chrome/Edge over USB.
 
 ### CI and releases (GitHub Actions)
 
 | Workflow | When | Output |
 |----------|------|--------|
-| [Build](.github/workflows/build.yml) | Push / PR to `main` | Artifact `plane-radar-supermini` (merged + split `.bin` files, ~90 days) |
+| [Build](.github/workflows/build.yml) | Push to `main`, any PR, or manual run | Artifact `plane-radar-qualia` (factory + split `.bin` files, ~90 days) |
 | [Release](.github/workflows/release.yml) | Git tag `v*` (e.g. `v1.0.0`) | GitHub Release asset `plane-radar-v1.0.0.bin` + `.sha256` |
+| [Release](.github/workflows/release.yml) | Manual run (test) | Artifact `plane-radar-manual-<sha>` only; nothing is published |
 
 To ship a version users can download:
 
@@ -200,10 +221,11 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The release workflow builds firmware in CI and attaches the merged image to the release. Download from **Releases** on GitHub, then flash at **0x0** (ESP32-C3, 4 MB).
+The release workflow builds the firmware in CI and attaches the factory image to the release. Download it from **Releases** on GitHub, then flash at **0x0** (ESP32-S3, 16 MB).
 
 ## Dependencies
 
-- [LovyanGFX](https://github.com/lovyan03/LovyanGFX)
+- [LovyanGFX](https://github.com/lovyan03/LovyanGFX): all drawing
+- [GFX Library for Arduino](https://github.com/moononournation/Arduino_GFX): panel init and framebuffer
 - [WiFiManager](https://github.com/tzapu/WiFiManager)
 - [ArduinoJson](https://github.com/bblanchon/ArduinoJson)

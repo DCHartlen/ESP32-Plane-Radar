@@ -7,12 +7,8 @@ void wifiResetCredentialsAndReboot();
 bool wifiSetupConnect();
 /** Reconnect using saved creds; never opens the captive portal. */
 bool wifiReconnect();
-/** Keeps the LAN config portal alive; call every loop() iteration. */
+/**
+ * Keeps the LAN config portal alive and acts on a hold-UP reset; call every loop()
+ * iteration (also the adsb poll hook during long HTTP I/O).
+ */
 void wifiLoop();
-bool wifiBootButtonPressed();
-/** GPIO + interrupt setup; call once early in setup(). */
-void bootButtonInit();
-/** Latched short tap (survives blocking HTTP/display work). */
-bool bootButtonConsumeTap();
-/** Call each loop iteration; triggers WiFi reset on long hold. */
-void bootButtonPollLongPress();

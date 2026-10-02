@@ -1,8 +1,7 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-
-#include <driver/gpio.h>
 
 namespace config {
 
@@ -23,33 +22,80 @@ constexpr unsigned long kWifiDownGraceMs = 4000;
 /** Minimum interval between background reconnect tries. */
 constexpr unsigned long kWifiReconnectIntervalMs = 15000;
 
-// --- BOOT button (ESP32-C3 Super Mini, active LOW) ---
-constexpr gpio_num_t kBootPin = GPIO_NUM_9;
-constexpr unsigned long kBootResetHoldMs = 3000UL;
-/** Ignore BOOT taps shorter than this (debounce). */
-constexpr unsigned long kBootTapMinMs = 40UL;
+// --- Buttons (Qualia UP/DOWN on the PCA9554 expander; GPIO0/BOOT is display line B4) ---
+/** Holding UP this long clears Wi-Fi + settings and reboots into the portal. */
+constexpr unsigned long kResetHoldMs = 3000UL;
+/** Expander poll period; a level counts after 2 identical samples in a row. */
+constexpr unsigned long kButtonPollMs = 20;
+/** Range taps are saved to NVS once no tap has arrived for this long. */
+constexpr unsigned long kRangeSaveDelayMs = 2000;
 
-// --- Display: GC9A01 1.28" round 240×240 (SPI) ---
-constexpr gpio_num_t kDisplayPinRst = GPIO_NUM_0;
-constexpr gpio_num_t kDisplayPinCs = GPIO_NUM_1;
-constexpr gpio_num_t kDisplayPinDc = GPIO_NUM_10;
-constexpr gpio_num_t kDisplayPinMosi = GPIO_NUM_3;  // display SDA
-constexpr gpio_num_t kDisplayPinSclk = GPIO_NUM_4;  // display SCL
+// --- I2C (expander) ---
+constexpr int kI2cPinSda = 8;
+constexpr int kI2cPinScl = 18;
+constexpr uint32_t kI2cHz = 400000;
 
-constexpr int kDisplayWidth = 240;
-constexpr int kDisplayHeight = 240;
+// --- PCA9554A expander @ 0x3F (interrupt not wired: poll it) ---
+constexpr uint8_t kExpanderAddr = 0x3F;
+constexpr uint8_t kExpanderPinTftSck = 0;
+constexpr uint8_t kExpanderPinTftCs = 1;
+constexpr uint8_t kExpanderPinTftReset = 2;
+constexpr uint8_t kExpanderPinBacklight = 4;
+constexpr uint8_t kExpanderPinButtonUp = 5;
+constexpr uint8_t kExpanderPinButtonDown = 6;
+constexpr uint8_t kExpanderPinTftMosi = 7;
+/** Measured on hardware: UP/DOWN read 1 when released, 0 when pressed. */
+constexpr bool kButtonActiveLow = true;
 
-constexpr uint32_t kDisplaySpiWriteHz = 40000000;
-// GC9A01 modules often need invert + BGR for correct black/green output
-constexpr bool kDisplayInvert = true;
-constexpr bool kDisplayRgbOrder = true;
+// --- Display: 4" round 720x720 NV3052C (HD40015C40), RGB-666 wired as RGB565 ---
+constexpr int kDisplayWidth = 720;
+constexpr int kDisplayHeight = 720;
+
+constexpr int8_t kPanelPinDe = 2;
+constexpr int8_t kPanelPinVsync = 42;
+constexpr int8_t kPanelPinHsync = 41;
+constexpr int8_t kPanelPinPclk = 1;
+constexpr int8_t kPanelPinR[5] = {11, 10, 9, 46, 3};       // R1..R5
+constexpr int8_t kPanelPinG[6] = {48, 47, 21, 14, 13, 12};  // G0..G5
+constexpr int8_t kPanelPinB[5] = {40, 39, 38, 0, 45};       // B1..B5 (B4 = GPIO0/BOOT)
+
+constexpr uint16_t kPanelHsyncPolarity = 1;
+constexpr uint16_t kPanelHsyncFrontPorch = 46;
+constexpr uint16_t kPanelHsyncPulseWidth = 2;
+constexpr uint16_t kPanelHsyncBackPorch = 44;
+constexpr uint16_t kPanelVsyncPolarity = 1;
+constexpr uint16_t kPanelVsyncFrontPorch = 50;
+constexpr uint16_t kPanelVsyncPulseWidth = 16;
+constexpr uint16_t kPanelVsyncBackPorch = 16;
+constexpr uint16_t kPanelPclkActiveNeg = 1;
+
+/**
+ * Refresh = pclk / (812 * 802): 12 MHz ~18 Hz (dark shades flicker on hardware),
+ * 16 MHz ~25 Hz, 20 MHz ~31 Hz. Lower it if the image jitters or drifts under Wi-Fi load.
+ */
+// Measured (2026-10-02): 16 MHz works for STA + HTTPS and the setup AP with 36-line bounce
+// buffers; with 10 lines Wi-Fi couldn't connect. Keep metal away from the antenna (a
+// shielding bag under the board made the AP unusable). PSRAM draws are ~30% slower than
+// at 12 MHz because the scan-out reads PSRAM faster.
+constexpr int32_t kPanelPclkHz = 16000000;
+/**
+ * SRAM bounce buffer (pixels, line count must divide 720). Required: the double-buffered
+ * panel relies on it (see panel.cpp).
+ * Two are allocated in internal RAM (36 lines = 2 x 51.8 KB). Fewer lines slipped the
+ * frame (vertical shift) under Wi-Fi + present load, and 10 lines broke Wi-Fi at 16 MHz.
+ */
+constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 36;
+/** Rotate the whole UI 180 degrees if the panel is mounted upside down. */
+constexpr bool kDisplayRotate180 = false;
 
 // --- Radar center defaults (overridden via WiFi setup portal) ---
 constexpr double kDefaultRadarLat = 52.3676;
 constexpr double kDefaultRadarLon = 4.9041;
 
 /** Poll adsb.fi (API public limit: 1 req/s). */
-constexpr unsigned long kAdsbFetchIntervalMs = 3000;
+constexpr unsigned long kAdsbFetchIntervalMs = 5000;
+/** Hide aircraft (and show the fetch error) when the last good fetch is older than this. */
+constexpr unsigned long kAdsbStaleAfterMs = 30000;
 /** Legacy scale unused — fetch uses radar::fetchRadiusKm() to screen edge. */
 constexpr float kAdsbFetchRadiusScale = 1.0f;
 /** false = hide aircraft with alt_baro "ground"; true = show them too. */
