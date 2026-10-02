@@ -1,10 +1,7 @@
 #include "ui/radar_display.h"
 
-#include <lgfx/v1/lgfx_fonts.hpp>
-
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -38,21 +35,9 @@ using radar::distSqFromCenter;
 using radar::latLonToScreen;
 using radar::offsetKmFromCenter;
 
-bool s_label_metrics_ready = false;
-bool s_cardinal_use_vlw = false;
-bool s_scale_use_vlw = false;
-float s_cardinal_vlw_size = 0.56f;
-float s_scale_vlw_size = 0.50f;
-float s_tag_vlw_size = 0.56f;
-const lgfx::GFXfont* s_cardinal_gfx = &fonts::FreeSansBold12pt7b;
-const lgfx::GFXfont* s_scale_gfx = &fonts::FreeSansBold9pt7b;
-const lgfx::GFXfont* s_tag_gfx = &fonts::FreeSansBold12pt7b;
-
-bool s_tag_label_metrics_ready = false;
-bool s_tag_use_vlw = false;
-
-int s_scale_label_max_w = 0;
-int s_scale_label_h = 0;
+/** Scale label is a little shorter than the cardinal letters. */
+constexpr int kScaleLabelHeightPx =
+    radar::kCardinalLabelHeightPx - radar::kScaleBelowCardinalPx;
 
 lgfx::LovyanGFX* s_draw = &canvas;
 
@@ -64,116 +49,6 @@ class DrawScope {
  private:
   lgfx::LovyanGFX* prev_;
 };
-
-int absDiff(int a, int b) { return std::abs(a - b); }
-
-int measureGfxHeight(const lgfx::GFXfont& font) {
-  canvas.setFont(&font);
-  canvas.setTextSize(1);
-  return canvas.fontHeight();
-}
-
-int measureVlwHeight(float size) {
-  canvas.setTextSize(size);
-  return canvas.fontHeight();
-}
-
-float findVlwSizeForHeight(int target_px) {
-  float lo = 0.25f;
-  float hi = radar::kMaxVlwTextSize;
-  for (int i = 0; i < 16; ++i) {
-    const float mid = (lo + hi) * 0.5f;
-    if (measureVlwHeight(mid) < target_px) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-  return hi;
-}
-
-void applyScaleStyle();
-
-const lgfx::GFXfont* pickGfxFontClosest(
-    int target_px, const lgfx::GFXfont* const* candidates, size_t count) {
-  const lgfx::GFXfont* best = candidates[0];
-  int best_diff = absDiff(measureGfxHeight(*best), target_px);
-
-  for (size_t i = 1; i < count; ++i) {
-    const int diff = absDiff(measureGfxHeight(*candidates[i]), target_px);
-    if (diff < best_diff) {
-      best_diff = diff;
-      best = candidates[i];
-    }
-  }
-  return best;
-}
-
-void initLabelMetrics() {
-  if (s_label_metrics_ready) {
-    return;
-  }
-
-  const int cardinal_target = radar::kCardinalLabelHeightPx;
-
-  if (displayFontIsSmooth()) {
-    s_cardinal_use_vlw = true;
-    s_cardinal_vlw_size = findVlwSizeForHeight(cardinal_target);
-    const int cardinal_h = measureVlwHeight(s_cardinal_vlw_size);
-    const int scale_target = cardinal_h - radar::kScaleBelowCardinalPx;
-    s_scale_use_vlw = true;
-    s_scale_vlw_size = findVlwSizeForHeight(scale_target);
-  } else {
-    const lgfx::GFXfont* cardinal_candidates[] = {&fonts::FreeSansBold12pt7b,
-                                                  &fonts::FreeSansBold9pt7b};
-    s_cardinal_gfx =
-        pickGfxFontClosest(cardinal_target, cardinal_candidates, 2);
-    s_cardinal_use_vlw = false;
-
-    const int cardinal_h = measureGfxHeight(*s_cardinal_gfx);
-    const int scale_target = cardinal_h - radar::kScaleBelowCardinalPx;
-    const lgfx::GFXfont* scale_candidates[] = {&fonts::FreeSansBold9pt7b,
-                                               &fonts::FreeSansBold12pt7b};
-    s_scale_gfx = pickGfxFontClosest(scale_target, scale_candidates, 2);
-    s_scale_use_vlw = false;
-  }
-
-  applyScaleStyle();
-  s_scale_label_h = canvas.fontHeight();
-  s_scale_label_max_w = 0;
-  char label[12];
-  for (size_t i = 0; i < radar::kRangePresetCount; ++i) {
-    for (bool miles : {false, true}) {
-      radar::formatRing3Label(label, sizeof(label), radar::kRangePresets[i].ring3_km,
-                              miles);
-      const int w = canvas.textWidth(label);
-      if (w > s_scale_label_max_w) {
-        s_scale_label_max_w = w;
-      }
-    }
-  }
-
-  s_label_metrics_ready = true;
-}
-
-void initTagLabelMetrics() {
-  if (s_tag_label_metrics_ready) {
-    return;
-  }
-
-  const int target = radar::kAircraftTagLabelHeightPx;
-  if (displayFontIsSmooth()) {
-    s_tag_use_vlw = true;
-    s_tag_vlw_size = findVlwSizeForHeight(target);
-  } else {
-    const lgfx::GFXfont* tag_candidates[] = {&fonts::FreeSansBold12pt7b,
-                                               &fonts::FreeSansBold9pt7b};
-    s_tag_gfx = pickGfxFontClosest(target, tag_candidates, 2);
-    s_tag_use_vlw = false;
-  }
-
-  s_tag_label_metrics_ready = true;
-}
 
 void initPalette() {
   radar::kColorBackground = canvas.color565(radar::kBgR, radar::kBgG, radar::kBgB);
@@ -238,23 +113,15 @@ void drawBeyondRingDot(int x, int y) {
                            radar::kColorAircraft);
 }
 
+/** Screen length of the distance flown in kAircraftTrackHorizonSec at the current range. */
 int speedLineLengthPx(float gs_knots) {
   if (gs_knots <= 0.0f) {
     return 0;
   }
-
-  // Fixed screen scale: 60 s horizon at gs, not tied to current range zoom.
-  constexpr float kKmPerKnotPerHorizon =
-      1.852f * radar::kAircraftTrackHorizonSec / 3600.0f;
-  const float px =
-      gs_knots * kKmPerKnotPerHorizon * radar::kGridOuterRadius /
-      radar::kAircraftTrackRefOuterKm * radar::kAircraftTrackLengthScale;
-
-  const int len = static_cast<int>(px + 0.5f);
-  if (len < radar::kAircraftSpeedLineMinPx) {
-    return radar::kAircraftSpeedLineMinPx;
-  }
-  return len;
+  constexpr float kKmPerKnot = 1.852f * radar::kAircraftTrackHorizonSec / 3600.0f;
+  const float px = gs_knots * kKmPerKnot * radar::kGridOuterRadius /
+                   radar::rangeCurrent().outer_km;
+  return static_cast<int>(px + 0.5f);
 }
 
 void noseTip(int cx, int cy, float heading_deg, int* tip_x, int* tip_y) {
@@ -286,35 +153,26 @@ void drawHeadingTriangle(int cx, int cy, float heading_deg, uint16_t color) {
                        base_x - wing_x, base_y - wing_y, color);
 }
 
-void drawSpeedVector(int cx, int cy, float heading_deg, float track_deg,
-                     float gs_knots, uint16_t color) {
+/** Drawn before the symbol, so the part under the triangle is hidden. */
+void drawSpeedVector(int cx, int cy, float track_deg, float gs_knots, uint16_t color) {
   const int len = speedLineLengthPx(gs_knots);
   if (len <= 0) {
     return;
   }
 
-  int tip_x = 0;
-  int tip_y = 0;
-  noseTip(cx, cy, heading_deg, &tip_x, &tip_y);
-
   constexpr float kDegToRad = 0.01745329252f;
   const float rad = track_deg * kDegToRad;
-  int ex = tip_x + static_cast<int>(lroundf(sinf(rad) * len));
-  int ey = tip_y - static_cast<int>(lroundf(cosf(rad) * len));
-  clipPointToOuterRing(tip_x, tip_y, &ex, &ey);
-  if (ex == tip_x && ey == tip_y) {
+  int ex = cx + static_cast<int>(lroundf(sinf(rad) * len));
+  int ey = cy - static_cast<int>(lroundf(cosf(rad) * len));
+  clipPointToOuterRing(cx, cy, &ex, &ey);
+  if (ex == cx && ey == cy) {
     return;
   }
-  s_draw->drawWideLine(tip_x, tip_y, ex, ey, radar::kAircraftTrackLineHalfWidth,
-                       color);
+  s_draw->drawWideLine(cx, cy, ex, ey, radar::kAircraftTrackLineHalfWidth, color);
 }
 
 void applyTagStyle() {
-  if (s_tag_use_vlw) {
-    displayFontSetSmoothSize(*s_draw, s_tag_vlw_size);
-  } else {
-    displayFontSetBitmap(*s_draw, s_tag_gfx);
-  }
+  displayFontApply(*s_draw, radar::kAircraftTagLabelHeightPx);
 }
 
 int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
@@ -342,7 +200,6 @@ int measureTagBlockWidth(const services::adsb::Aircraft& plane) {
 }
 
 void drawAircraftTag(int x, int y, const services::adsb::Aircraft& plane) {
-  initTagLabelMetrics();
   applyTagStyle();
 
   const int line_h = s_draw->fontHeight();
@@ -423,7 +280,6 @@ void sortBeyondDotsFarFirst(BeyondDotDrawItem* items, size_t count) {
 }
 
 void drawAircraft() {
-  initLabelMetrics();
 
   const size_t n = services::adsb::aircraftCount();
   const services::adsb::Aircraft* planes = services::adsb::aircraftList();
@@ -473,8 +329,8 @@ void drawAircraft() {
     const size_t i = items[d].index;
     const int x = items[d].x;
     const int y = items[d].y;
-    drawSpeedVector(x, y, planes[i].nose_deg, planes[i].track_deg,
-                    planes[i].gs_knots, radar::kColorTrackVector);
+    drawSpeedVector(x, y, planes[i].track_deg, planes[i].gs_knots,
+                    radar::kColorTrackVector);
     drawHeadingTriangle(x, y, planes[i].nose_deg, radar::kColorAircraft);
   }
   for (size_t d = 0; d < draw_count; ++d) {
@@ -484,20 +340,10 @@ void drawAircraft() {
 }
 
 void applyCardinalStyle() {
-  if (s_cardinal_use_vlw) {
-    displayFontSetSmoothSize(*s_draw, s_cardinal_vlw_size);
-  } else {
-    displayFontSetBitmap(*s_draw, s_cardinal_gfx);
-  }
+  displayFontApply(*s_draw, radar::kCardinalLabelHeightPx);
 }
 
-void applyScaleStyle() {
-  if (s_scale_use_vlw) {
-    displayFontSetSmoothSize(*s_draw, s_scale_vlw_size);
-  } else {
-    displayFontSetBitmap(*s_draw, s_scale_gfx);
-  }
-}
+void applyScaleStyle() { displayFontApply(*s_draw, kScaleLabelHeightPx); }
 
 void drawCardinalLabel(const char* text, int x, int y, textdatum_t datum) {
   applyCardinalStyle();
@@ -577,9 +423,7 @@ void drawScaleLabel(int cx, int cy, int outer_radius) {
 
 template <typename Gfx>
 void drawStaticGrid(Gfx& gfx) {
-  initLabelMetrics();
   const DrawScope scope(gfx);
-  displayFontEnsureLoaded(gfx);
   const int cx = radar::kCenterX;
   const int cy = radar::kCenterY;
   const int grid_r = radar::kGridOuterRadius;
@@ -611,7 +455,6 @@ void renderFrame() {
 
 void radarDisplayDraw() {
   initPalette();
-  initLabelMetrics();
   renderFrame();
 }
 

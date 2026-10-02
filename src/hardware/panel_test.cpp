@@ -83,13 +83,12 @@ void drawCircles() {
 }
 
 void drawText() {
-  displayFontEnsureLoaded(canvas);
   canvas.setTextDatum(textdatum_t::middle_center);
   canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-  const float sizes[] = {1.0f, 2.0f, 3.0f};
+  const int heights[] = {16, 33, 48};
   int y = 420;
-  for (float size : sizes) {
-    displayFontSetSmoothSize(canvas, size);
+  for (int height : heights) {
+    displayFontApply(canvas, height);
     canvas.drawString("Plane Radar 720", kCx, y);
     y += canvas.fontHeight() + 6;
   }
@@ -97,7 +96,7 @@ void drawText() {
   snprintf(info, sizeof(info), "pclk %ld Hz  bounce %u px",
            static_cast<long>(config::kPanelPclkHz),
            static_cast<unsigned>(config::kPanelBounceBufferPx));
-  displayFontSetSmoothSize(canvas, 1.2f);
+  displayFontApply(canvas, 20);
   canvas.drawString(info, kCx, 110);
 }
 
@@ -108,7 +107,7 @@ void drawStatusLine() {
   snprintf(line, sizeof(line), "fetch ok %lu fail %lu  UP %d DOWN %d",
            static_cast<unsigned long>(s_fetch_ok), static_cast<unsigned long>(s_fetch_fail),
            s_up_level ? 1 : 0, s_down_level ? 1 : 0);
-  displayFontSetSmoothSize(canvas, 1.2f);
+  displayFontApply(canvas, 20);
   canvas.setTextDatum(textdatum_t::middle_center);
   canvas.setTextColor(TFT_WHITE, TFT_BLACK);
   canvas.drawString(line, kCx, kStatusY + kStatusH / 2);

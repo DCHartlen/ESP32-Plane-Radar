@@ -2,14 +2,13 @@
 
 #include <LovyanGFX.hpp>
 
+/** Checks the embedded VLW fonts; falls back to a scaled bitmap font if they don't load. */
 bool displayFontInit();
 bool displayFontIsSmooth();
 
-/** Load embedded VLW font on gfx if smooth fonts are enabled and not already active. */
-bool displayFontEnsureLoaded(lgfx::LGFXBase& gfx);
-
-/** VLW: setTextSize scale (1.0 = font point size). Bitmap: no-op — use displayFontSetBitmap. */
-void displayFontSetSmoothSize(lgfx::LGFXBase& gfx, float size);
-
-/** Bitmap GFXfont fallback; clears any runtime VLW font on this instance. */
-void displayFontSetBitmap(lgfx::LGFXBase& gfx, const lgfx::GFXfont* font);
+/**
+ * Set gfx's font so fontHeight() == height_px (line height, ascent + descent).
+ * Uses the smallest embedded VLW at least that tall and scales it down, so text
+ * stays sharp. Reloads only when gfx doesn't already hold that VLW.
+ */
+void displayFontApply(lgfx::LGFXBase& gfx, int height_px);

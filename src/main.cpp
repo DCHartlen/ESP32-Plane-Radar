@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 #include "config.h"
 #include "hardware/buttons.h"
@@ -60,6 +61,11 @@ void fetchAndDrawAircraft() {
                                   services::location::lon(), fetch_km)) {
     ui::radarDisplayRefreshAircraft();
   }
+  // Internal RAM headroom (bounce buffers and TLS both come from it).
+  Serial.printf("Heap internal: free %u KB, min ever %u KB, largest block %u KB\n",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024,
+                heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024,
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
   handleButtons();
 }
 

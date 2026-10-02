@@ -126,9 +126,13 @@ include/
     radar_location.h
     adsb_client.h
 data/
-  ui_font.vlw              — embedded smooth UI font (Noto Sans Bold)
+  ui_font_small.vlw        — embedded smooth UI fonts (generated)
+  ui_font_large.vlw
+fonts/
+  NotoSans-Bold.ttf        — source font for the VLW files (OFL.txt)
 scripts/
   build_large_airports.py
+  build_vlw_font.py
 src/
   main.cpp
   data/

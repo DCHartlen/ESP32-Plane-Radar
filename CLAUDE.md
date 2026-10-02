@@ -16,6 +16,7 @@ pio run -e qualia -t upload          # flash over USB-C
 pio device monitor                   # serial log at 115200 baud
 ./scripts/merge-firmware.sh [--no-build]   # copies firmware.factory.bin to release/plane-radar-merged.bin
 python3 scripts/build_large_airports.py    # regenerate the runway dataset from OurAirports
+python3 scripts/build_vlw_font.py          # regenerate data/ui_font_*.vlw (needs: pip install freetype-py)
 ```
 
 pioarduino builds the merged `firmware.factory.bin` itself (bootloader, partitions, boot_app0, the board's TinyUF2 image and the app). Pushing a `v*` tag runs `release.yml`, which attaches `plane-radar-<tag>.bin` and its `.sha256` to a GitHub Release.
@@ -32,7 +33,7 @@ pioarduino builds the merged `firmware.factory.bin` itself (bootloader, partitio
 - `ui/radar_display` renders every frame (grid, runways, labels, aircraft) into one full-screen 16-bit `LGFX_Sprite` and pushes it in a single `pushSprite`, which avoids flicker. If the sprite can't be allocated, it draws straight to `tft`. Drawing helpers target whatever `s_draw` points to, and a `DrawScope` switches it.
 - `ui/runway_overlay` draws runways from `data/large_airports` (coordinates stored as int32 `e7`). `src/data/large_airports_data.cpp` and `include/data/large_airports.h` are **generated** by `scripts/build_large_airports.py`. Don't hand-edit them.
 - `ui/radar_theme.h` holds layout constants and colors. `ui/status_screens` draws the setup and connecting screens.
-- `hardware/lgfx_config.hpp` sets up the LovyanGFX panel and bus from `config.h`. `hardware/display_font` loads the anti-aliased VLW font that `board_build.embed_files` embeds (`data/ui_font.vlw`), with GFX fonts as a fallback.
+- `hardware/lgfx_config.hpp` sets up the LovyanGFX panel and bus from `config.h`. `hardware/display_font` holds the anti-aliased VLW fonts that `board_build.embed_files` embeds (`data/ui_font_small.vlw` / `ui_font_large.vlw`). `displayFontApply(gfx, height_px)` picks the smallest file at least that tall and scales it down. `FreeSansBold24pt7b` is the only bitmap fallback. The VLW files are **generated** by `scripts/build_vlw_font.py` (freetype-py) from `fonts/NotoSans-Bold.ttf`.
 
 Lat/lon is projected to screen space with an equirectangular approximation: `dx = Δlon·kKmPerDeg·cos(center_lat)`, `dy = Δlat·kKmPerDeg`. It lives in `ui/radar_geometry`, which both `radar_display.cpp` and `runway_overlay.cpp` use.
 

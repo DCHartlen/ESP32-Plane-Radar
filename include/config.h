@@ -77,8 +77,12 @@ constexpr uint16_t kPanelPclkActiveNeg = 1;
 // a shielding bag under the board made the AP unusable). 16 MHz looks better, but Wi-Fi
 // can't connect, even in STA mode.
 constexpr int32_t kPanelPclkHz = 12000000;  // See "Open issues" in docs/qualia-port-plan.md
-/** SRAM bounce buffer (pixels, must divide 720*720); 0 = scan straight from PSRAM. */
-constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 10;
+/**
+ * SRAM bounce buffer (pixels, must divide 720*720); 0 = scan straight from PSRAM.
+ * Two are allocated in internal RAM. Each line gives the refill ISR ~68 us more slack
+ * at 12 MHz; 10 lines slipped the frame (vertical shift) under Wi-Fi + present load.
+ */
+constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 20;
 /** Rotate the whole UI 180 degrees if the panel is mounted upside down. */
 constexpr bool kDisplayRotate180 = false;
 

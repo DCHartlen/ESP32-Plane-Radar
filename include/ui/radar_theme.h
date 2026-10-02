@@ -12,7 +12,7 @@ constexpr int kSize = config::kDisplayWidth;
 constexpr int kCenterX = kSize / 2;
 constexpr int kCenterY = kSize / 2;
 
-/** Target cap height (px) for N/S/E/W. */
+/** Text line height (fontHeight, px) for N/S/E/W. */
 constexpr int kCardinalLabelHeightPx = px(14);
 /** Scale label is this many px shorter than cardinals. */
 constexpr int kScaleBelowCardinalPx = px(3);
@@ -41,14 +41,11 @@ constexpr int kCenterDotRadius = px(2);
 constexpr int kAircraftNoseLenPx = px(12);
 constexpr int kAircraftTailLenPx = px(4.5f);
 constexpr int kAircraftTailHalfPx = px(6);
-/** Track vector: ground distance covered in this many seconds at current gs. */
-constexpr float kAircraftTrackHorizonSec = 60.0f;
-/** Minimum visible vector when gs > 0 (px). */
-constexpr int kAircraftSpeedLineMinPx = px(2);
-/** Track line length uses this outer_km, not the active range preset. */
-constexpr float kAircraftTrackRefOuterKm = 13.3f;
-/** Shorter than full 60 s horizon at ref scale; ×1.5 length boost applied. */
-constexpr float kAircraftTrackLengthScale = 1.5f / 5.0f;
+/**
+ * Track vector: from the aircraft's position to where it will be after this many
+ * seconds at its current groundspeed and track, at the active range's scale.
+ */
+constexpr float kAircraftTrackHorizonSec = 30.0f;
 /** drawWideLine half-width for speed vectors. */
 constexpr float kAircraftTrackLineHalfWidth = pxF(1.0f);
 
@@ -65,10 +62,8 @@ constexpr int kAircraftInsideRingInsetPx =
 /** Beyond-ring traffic: bearing cues on screen rim (correct direction, fixed radius). */
 constexpr int kBeyondRingDotRadiusPx = px(4);
 constexpr int kBeyondRingScreenMarginPx = px(2);
-/** Target cap height (px) for aircraft tags (bold, slightly above scale label). */
+/** Text line height (fontHeight, px) for aircraft tags (slightly above scale label). */
 constexpr int kAircraftTagLabelHeightPx = px(13);
-/** Upper bound for the VLW size search (the embedded font is scaled up until Phase 5). */
-constexpr float kMaxVlwTextSize = 8.0f;
 
 /** RGB565 palette targets (applied in initPalette). */
 constexpr uint8_t kBgR = 4;

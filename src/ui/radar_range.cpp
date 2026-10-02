@@ -100,6 +100,7 @@ bool rangePrev() {
 void rangeSaveIfDue() {
   if (s_range_save_pending && millis() - s_range_changed_ms >= config::kRangeSaveDelayMs) {
     s_range_save_pending = false;
+    Serial.printf("Range saved to NVS at %lu ms\n", millis());
     saveRangeIndex();
   }
 }
