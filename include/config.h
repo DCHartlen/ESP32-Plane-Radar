@@ -73,16 +73,18 @@ constexpr uint16_t kPanelPclkActiveNeg = 1;
  * Refresh = pclk / (812 * 802): 12 MHz ~18 Hz (dark shades flicker on hardware),
  * 16 MHz ~25 Hz, 20 MHz ~31 Hz. Lower it if the image jitters or drifts under Wi-Fi load.
  */
-// Measured: 12 MHz = setup AP and STA + HTTPS work (keep metal away from the antenna;
-// a shielding bag under the board made the AP unusable). 16 MHz looks better, but Wi-Fi
-// can't connect, even in STA mode.
-constexpr int32_t kPanelPclkHz = 12000000;  // See "Open issues" in docs/qualia-port-plan.md
+// Measured (2026-10-02): 16 MHz works for STA + HTTPS and the setup AP with 36-line bounce
+// buffers; with 10 lines Wi-Fi couldn't connect. Keep metal away from the antenna (a
+// shielding bag under the board made the AP unusable). PSRAM draws are ~30% slower than
+// at 12 MHz because the scan-out reads PSRAM faster.
+constexpr int32_t kPanelPclkHz = 16000000;
 /**
- * SRAM bounce buffer (pixels, must divide 720*720); 0 = scan straight from PSRAM.
- * Two are allocated in internal RAM. Each line gives the refill ISR ~68 us more slack
- * at 12 MHz; 10 lines slipped the frame (vertical shift) under Wi-Fi + present load.
+ * SRAM bounce buffer (pixels, line count must divide 720). Required: the double-buffered
+ * panel relies on it (see panel.cpp).
+ * Two are allocated in internal RAM (36 lines = 2 x 51.8 KB). Fewer lines slipped the
+ * frame (vertical shift) under Wi-Fi + present load, and 10 lines broke Wi-Fi at 16 MHz.
  */
-constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 20;
+constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 36;
 /** Rotate the whole UI 180 degrees if the panel is mounted upside down. */
 constexpr bool kDisplayRotate180 = false;
 

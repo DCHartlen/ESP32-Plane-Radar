@@ -1,11 +1,9 @@
 #include "ui/status_screens.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
-#include <iterator>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -23,21 +21,12 @@ constexpr int kCenterY = config::kDisplayHeight / 2;
 constexpr int kSpinnerDotCount = 10;
 constexpr int kSpinnerRadius = kCenterX - px(7);
 constexpr int kSpinnerDotRadius = px(2);
-constexpr int kSpinnerEraseRadius = px(4);
 constexpr float kSpinnerStepDeg = 6.0f;
-
-struct SpinnerDot {
-  int x = 0;
-  int y = 0;
-  bool drawn = false;
-};
 
 char s_connecting_ssid[33];
 char s_ssid_line[33];
 constexpr int kConnectingTextMaxWidthPx = static_cast<int>(0.9f * config::kDisplayWidth);
 float s_spinner_angle_deg = -90.0f;
-SpinnerDot s_spinner_dots[kSpinnerDotCount];
-bool s_connecting_text_drawn = false;
 
 /** Line heights in design px (old 240 px screen); scaled with px(). */
 constexpr float kTitleHeight = 18.5f;
@@ -104,42 +93,16 @@ void fitSsidLine() {
 }
 
 void drawConnectingText() {
-  canvas.fillScreen(config::kColorBlack);
-
   canvas.setTextDatum(textdatum_t::middle_center);
   canvas.setTextColor(config::kTextOnBlack, config::kColorBlack);
 
   applyConnectingDetailStyle();
   const int detail_h = canvas.fontHeight();
   const int total_h = detail_h * 2 + kLineGap;
-  const int block_top = (config::kDisplayHeight - total_h) / 2;
-  constexpr int kPanelPadY = px(8);
-  canvas.fillRect(kCenterX - kConnectingTextMaxWidthPx / 2, block_top - kPanelPadY,
-               kConnectingTextMaxWidthPx, total_h + kPanelPadY * 2, config::kColorBlack);
-
-  int y = block_top;
+  int y = (config::kDisplayHeight - total_h) / 2;
   canvas.drawString("Connecting to", kCenterX, y + detail_h / 2);
   y += detail_h + kLineGap;
   canvas.drawString(s_ssid_line, kCenterX, y + detail_h / 2);
-
-  s_connecting_text_drawn = true;
-}
-
-/** Push just the area a spinner dot (or its erase disc) covers. */
-void presentSpinnerDot(const SpinnerDot& dot) {
-  displayPresentRect(dot.x - kSpinnerEraseRadius, dot.y - kSpinnerEraseRadius,
-                     kSpinnerEraseRadius * 2 + 1, kSpinnerEraseRadius * 2 + 1);
-}
-
-void eraseSpinnerDots() {
-  for (int i = 0; i < kSpinnerDotCount; ++i) {
-    if (!s_spinner_dots[i].drawn) {
-      continue;
-    }
-    canvas.fillCircle(s_spinner_dots[i].x, s_spinner_dots[i].y, kSpinnerEraseRadius,
-                   config::kColorBlack);
-    s_spinner_dots[i].drawn = false;
-  }
 }
 
 void drawSpinnerDots() {
@@ -154,11 +117,15 @@ void drawSpinnerDots() {
     const int fade = 255 - i * 22;
     const uint16_t color = canvas.color565(0, fade, 0);
     canvas.fillSmoothCircle(x, y, kSpinnerDotRadius, color);
-
-    s_spinner_dots[i].x = x;
-    s_spinner_dots[i].y = y;
-    s_spinner_dots[i].drawn = true;
   }
+}
+
+/** The whole screen every tick: the back buffer holds the frame before last. */
+void drawConnectingScreen() {
+  canvas.fillScreen(config::kColorBlack);
+  drawConnectingText();
+  drawSpinnerDots();
+  displayPresent();
 }
 
 }  // namespace
@@ -169,35 +136,15 @@ void statusScreenConnectingBegin(const char* ssid) {
   s_connecting_ssid[sizeof(s_connecting_ssid) - 1] = '\0';
   fitSsidLine();
   s_spinner_angle_deg = -90.0f;
-  for (auto& dot : s_spinner_dots) {
-    dot.drawn = false;
-  }
-  s_connecting_text_drawn = false;
-  drawConnectingText();
-  drawSpinnerDots();
-  displayPresent();
+  drawConnectingScreen();
 }
 
 void statusScreenConnectingTick() {
-  if (!s_connecting_text_drawn) {
-    drawConnectingText();
-    displayPresent();
-  }
-  SpinnerDot previous[kSpinnerDotCount];
-  std::copy(std::begin(s_spinner_dots), std::end(s_spinner_dots), previous);
-  eraseSpinnerDots();
   s_spinner_angle_deg += kSpinnerStepDeg;
   if (s_spinner_angle_deg >= 270.0f) {
     s_spinner_angle_deg -= 360.0f;
   }
-  drawSpinnerDots();
-  // Push old and new dot areas only after both passes, so dots never blink.
-  for (int i = 0; i < kSpinnerDotCount; ++i) {
-    if (previous[i].drawn) {
-      presentSpinnerDot(previous[i]);
-    }
-    presentSpinnerDot(s_spinner_dots[i]);
-  }
+  drawConnectingScreen();
 }
 
 void statusScreenPortal() {

@@ -4,8 +4,11 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
+#include <esp_wifi.h>
 
 #include <cstdio>
+#include <cstring>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -28,7 +31,7 @@ constexpr unsigned long kFetchIntervalMs = 5000;
 constexpr unsigned long kButtonPollMs = 20;
 constexpr float kFetchRadiusKm = 50.0f;
 
-// Status line, redrawn with displayPresentRect to exercise partial pushes.
+// Status line; any change redraws the whole test screen.
 constexpr int kStatusX = kCx - 250;
 constexpr int kStatusY = 560;
 constexpr int kStatusW = 500;
@@ -111,7 +114,20 @@ void drawStatusLine() {
   canvas.setTextDatum(textdatum_t::middle_center);
   canvas.setTextColor(TFT_WHITE, TFT_BLACK);
   canvas.drawString(line, kCx, kStatusY + kStatusH / 2);
-  displayPresentRect(kStatusX, kStatusY, kStatusW, kStatusH);
+}
+
+/** Draws every frame in full (the back buffer holds the frame before last) and logs times. */
+void drawTestScreen(const char* reason) {
+  const unsigned long t0 = millis();
+  canvas.fillScreen(TFT_BLACK);
+  drawCircles();
+  drawColorBars();
+  drawText();
+  drawStatusLine();
+  const unsigned long t1 = millis();
+  displayPresent();
+  Serial.printf("panel test: %s frame: draw %lu ms, present %lu ms\n", reason, t1 - t0,
+                millis() - t1);
 }
 
 /** Logs raw expander levels on change; runs as the adsb poll hook too. */
@@ -127,15 +143,28 @@ void pollButtons() {
                   up ? 1 : 0, config::kExpanderPinButtonDown, down ? 1 : 0);
     s_up_level = up;
     s_down_level = down;
-    drawStatusLine();
+    drawTestScreen("button");
   }
 }
 
 void startWifi() {
+  // The disconnect reason tells radio trouble (e.g. NO_AP_FOUND, timeouts) from bad credentials.
+  WiFi.onEvent(
+      [](WiFiEvent_t, WiFiEventInfo_t info) {
+        const auto reason = static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason);
+        Serial.printf("panel test: Wi-Fi disconnected, reason %u (%s)\n",
+                      static_cast<unsigned>(reason), WiFi.disconnectReasonName(reason));
+      },
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.mode(WIFI_STA);
 #if defined(PANEL_TEST_WIFI_SSID) && defined(PANEL_TEST_WIFI_PASS)
   WiFi.begin(PANEL_TEST_WIFI_SSID, PANEL_TEST_WIFI_PASS);
 #else
+  wifi_config_t saved = {};
+  esp_wifi_get_config(WIFI_IF_STA, &saved);
+  char ssid[sizeof(saved.sta.ssid) + 1] = {};
+  memcpy(ssid, saved.sta.ssid, sizeof(saved.sta.ssid));
+  Serial.printf("panel test: saved SSID \"%s\"\n", ssid[0] != '\0' ? ssid : "(none)");
   WiFi.begin();  // credentials saved by WiFiManager
 #endif
   Serial.println("panel test: Wi-Fi connecting (saved or build-flag credentials)");
@@ -154,34 +183,28 @@ void fetchOnce() {
   Serial.printf("panel test: fetch %s in %lu ms, %u aircraft\n", ok ? "ok" : "FAILED",
                 t1 - t0, static_cast<unsigned>(services::adsb::aircraftCount()));
 
-  // Full-frame push under Wi-Fi load: watch for tearing or jitter here.
-  displayPresent();
-  Serial.printf("panel test: full present %lu ms\n", millis() - t1);
-  drawStatusLine();
+  // Full frame under Wi-Fi load: watch for tearing or jitter here.
+  drawTestScreen("fetch");
+  // The bounce buffers live in internal RAM; HTTPS needs headroom there too.
+  Serial.printf("panel test: internal heap %u KB free, %u KB min, %u KB largest\n",
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 }
 
 }  // namespace
 
 void panelTestRun() {
   Serial.println("PANEL TEST build");
-  Serial.printf("panel test: PSRAM %u KB free after canvas\n",
+  Serial.printf("panel test: PSRAM %u KB free after framebuffers\n",
                 static_cast<unsigned>(ESP.getFreePsram() / 1024));
-
-  const unsigned long t0 = millis();
-  canvas.fillScreen(TFT_BLACK);
-  drawCircles();
-  drawColorBars();
-  drawText();
-  const unsigned long t1 = millis();
-  displayPresent();
-  Serial.printf("panel test: draw %lu ms, present %lu ms\n", t1 - t0, millis() - t1);
 
   s_up_level = panelReadButton(config::kExpanderPinButtonUp);
   s_down_level = panelReadButton(config::kExpanderPinButtonDown);
   Serial.printf("buttons idle: UP(pin %u)=%d DOWN(pin %u)=%d. Press each to see its level.\n",
                 config::kExpanderPinButtonUp, s_up_level ? 1 : 0,
                 config::kExpanderPinButtonDown, s_down_level ? 1 : 0);
-  drawStatusLine();
+  drawTestScreen("first");
 
   services::location::init();
   services::adsb::setPollFn(pollButtons);

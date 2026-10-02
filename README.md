@@ -130,7 +130,7 @@ Edit **`include/config.h`** for hardware and behavior:
 | Portal | `kPortalApName`, `kPortalIp`, `kPortalHostname` / `kPortalHostUrl` (mDNS; needs `-DWM_MDNS` in `platformio.ini`) |
 | Wi‑Fi timing | Connect attempts, reconnect grace and interval, portal timeout (`0` = no timeout) |
 | Buttons | `kResetHoldMs`, `kButtonPollMs`, `kRangeSaveDelayMs`, expander pins, `kButtonActiveLow` |
-| Display | RGB pins, panel timings, `kPanelPclkHz` (12 MHz; higher breaks Wi‑Fi, see `docs/qualia-port-plan.md`), `kPanelBounceBufferPx`, `kDisplayRotate180` |
+| Display | RGB pins, panel timings, `kPanelPclkHz` (16 MHz; needs the 36-line bounce buffer, see `docs/qualia-port-plan.md`), `kPanelBounceBufferPx`, `kDisplayRotate180` |
 | Default location | `kDefaultRadarLat`, `kDefaultRadarLon` (until the portal overrides them) |
 | ADS-B | `kAdsbFetchIntervalMs`, `kAdsbStaleAfterMs`, `kAdsbShowGroundAircraft` |
 

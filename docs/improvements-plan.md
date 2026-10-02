@@ -1,6 +1,6 @@
 # Improvements plan (after the Qualia port)
 
-Status: **ideas / not started.** Finish `docs/qualia-port-plan.md` first. This plan collects what the
+Status: **roadmap step 1 (faster display output) done 2026-10-02; the rest not started.** This plan collects what the
 upstream forks have built, picks what's worth bringing over to the 720×720 Qualia build, and
 includes the auto-brightness plan.
 
@@ -25,22 +25,25 @@ Adafruit Qualia ESP32-S3 + 4" 720×720 NV3052C panel, on pioarduino and core 3.x
 buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 `src/hardware/display.cpp`.
 
-- **16 MHz pclk with Wi-Fi working.** This is the open issue in the port plan (Wi-Fi fails at
-  16 MHz here). They drive the panel with `esp_lcd` directly, not Arduino_GFX:
-  - `num_fbs = 2`
-  - `bounce_buffer_size_px = 720 * 36` (36 lines; the line count must divide 720). Ours is 7200 px
-    (10 lines).
-  - `dma_burst_size = 64`
+- **16 MHz pclk with Wi-Fi working. Done here (2026-10-02):** their 36-line bounce buffer
+  (`bounce_buffer_size_px = 720 * 36`) alone fixed it on our Arduino_GFX path. See the port
+  plan's open issues for measurements. Their other panel settings, compared with ours:
+  - `num_fbs = 2`: needed for the no-copy present below. Arduino_GFX hard-codes 1.
+  - `dma_burst_size = 64`: **already the same.** It shares a union with `psram_trans_align`,
+    which Arduino_GFX sets to 64.
+  - `pclk_active_neg = 0` (ours is 1): not needed for 16 MHz. Only worth trying if fine detail
+    shimmers.
   - `periph_module_reset(PERIPH_LCD_CAM_MODULE)` before init, and `esp_lcd_rgb_panel_restart()`
-    after, so a warm reboot doesn't shift the image vertically
-  - `WiFi.setSleep(WIFI_PS_NONE)` and `WiFi.setTxPower(WIFI_POWER_8_5dBm)`
-
-  Which of these makes 16 MHz work isn't known. Try the bigger bounce buffer first (cheapest).
-- **No-copy present.** LovyanGFX draws straight into the panel's back framebuffer
-  (`tft.setBuffer(qualiaRgbBackBuffer(), ...)`), and presenting calls `esp_lcd_panel_draw_bitmap`
-  with the driver's own buffer, which swaps on VSYNC without copying. Then `setBuffer` points at the
-  new back buffer. This removes our ~100 ms present. It works because we already redraw the full
-  frame every time.
+    after, so a warm reboot doesn't shift the image vertically. Done with the no-copy present.
+  - `WiFi.setSleep(WIFI_PS_NONE)`: we already do this. `WiFi.setTxPower(WIFI_POWER_8_5dBm)` isn't
+    theirs: it's an upstream ESP32-C3 fix (WatskeBart, `2e2808e`) merged into their fork, and it
+    crippled our setup AP in Phase 2. Don't bring it over.
+- **No-copy present. Done here (2026-10-02):** LovyanGFX draws straight into the panel's back
+  framebuffer (`setBuffer`, color depth `rgb565_nonswapped`), and presenting calls
+  `esp_lcd_panel_draw_bitmap` with the driver's own buffer, which switches buffers instead of
+  copying. Unlike theirs, `panelSwap()` then waits on the `on_frame_buf_complete` callback until
+  the old buffer is off screen, so the next frame never draws into the visible one. Present went
+  from ~110 ms to 0–40 ms (the rest of the current refresh). See `hardware/panel.cpp`.
 - **Smooth motion.** Between fetches each aircraft is dead-reckoned along `track_deg` at
   `gs_knots`, seeded with the ADS-B `seen_pos` age, and the radar redraws at 4 Hz
   (`kRadarRedrawIntervalMs = 250`). The fetch runs on a background FreeRTOS task. Commits
@@ -63,7 +66,7 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 | Plane icons by type (jet, light plane, spinning helicopter, balloon) | timclarke07, vfranchi | Partly. They're 10–16 px bitmaps; redo as polygons through `ui::px()` or regenerate larger. |
 | Highlights: military, emergency squawk (7500/7600/7700), favorites | GCamilleri, giplgwm, dreamiurg, mlciskey, oldjiberjaber, benyaffe | Yes. Small change. |
 | Climb/descend arrow, flight levels | cuotos, JoaoCostaIFG, blinkidy | Yes. |
-| Rotating sweep line | GCamilleri, smgam29, daredevilbear, RockBase-iot | Not until frames are faster. At ~3 fps it stutters. |
+| Rotating sweep line | GCamilleri, smgam29, daredevilbear, RockBase-iot | Not until drawing is faster. At ~3.5 fps it stutters. |
 | Land, terrain and coastline fill | benyaffe (filled land tiles), bartdelange (shaded terrain) | Easier than on the C3: draw the background once into a PSRAM sprite and copy it each frame. Big project. |
 | Route labels (origin → destination, airline) | blinkidy, devnulluk, Niko12345678, bartdelange, JoaoCostaIFG | Yes; room for another tag line. Needs extra adsbdb lookups. |
 | Extra screens (cockpit clock with wind and pressure, airport weather map) | benyaffe | Yes, but a lot of work. |
@@ -71,19 +74,33 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 
 ## Current frame budget
 
-From Phase 6 on hardware: draw ~107 ms with no aircraft, plus ~4 ms per aircraft (~185 ms with
-19), then present ~100 ms. That's ~285 ms per frame, ~3.5 fps. Smooth motion at 4 Hz needs under
-250 ms, and a sweep needs more. So the display speed-up comes first.
+With the no-copy present at 16 MHz (2026-10-02): draw ~230–250 ms with 16–19 aircraft, present
+0–40 ms. That's ~250–280 ms per frame, ~3.5–4 fps. Drawing didn't get faster: the framebuffers
+are in PSRAM like the old canvas was.
+
+| | Draw, ~20 aircraft | Present | Frame |
+|---|---|---|---|
+| 12 MHz, copy (Phase 6) | ~185 ms | ~100 ms | ~285 ms |
+| 16 MHz, copy | ~245 ms | ~110 ms | ~355 ms |
+| 16 MHz, no-copy | ~240 ms | 0–40 ms | ~260 ms |
+
+Smooth motion at 4 Hz needs under 250 ms, and a sweep needs more. That's close now. pvanbaren's
+loop redraws as fast as it can up to 4 Hz, which would give ~3.5 Hz here. If that looks steppy,
+drawing has to get cheaper; profile which parts cost most (anti-aliased labels read back the
+pixels they blend onto) before caching anything.
 
 ## Roadmap
 
-1. **Faster display output** (pvanbaren). Own the RGB panel through `esp_lcd` in `panel.cpp`
-   (Arduino_GFX keeps only the NV3052C init sequence, which the port plan already lists as a
-   fallback), draw into the back framebuffer, and present by swapping. Then retry 16 MHz with the
-   36-line bounce buffer and Wi-Fi power saving off. Check: present time, Wi-Fi at 16 MHz, setup AP
-   at 16 MHz, warm reboot alignment.
-2. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task, dead-reckon between
-   fetches with `seen_pos`, redraw at 4 Hz.
+1. **Faster display output** (pvanbaren). **Done 2026-10-02, verified on hardware:** 16 MHz
+   with 36-line bounce buffers, the panel owned through `esp_lcd` with two framebuffers and a
+   no-copy swap, LCD_CAM reset, and a scan-out resync on Wi-Fi connect. Checked: present time,
+   colors, spinner, Wi-Fi and setup AP, warm reboot. Not adopted: `pclk_active_neg = 0` (only
+   if fine detail shimmers) and `setTxPower`.
+2. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task (their fetch task
+   fills the aircraft list under a mutex; drawing takes a snapshot per frame), dead-reckon between
+   fetches with `seen_pos`, and redraw every 250 ms instead of after each fetch. Settle first:
+   `adsb_client`'s `PollFn` (portal servicing during a fetch), Wi-Fi drop handling and
+   `invalidate()`, and applying a range change on the next frame.
 3. **Label decluttering** (blinkidy). Closes the tag-overlap item in the port plan.
 4. **Color by altitude and fading trails** (selmapi). Cheap and noticeable.
 5. **Auto-brightness** (below). Independent of 1–4; can be done any time.

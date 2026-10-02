@@ -198,40 +198,58 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 
 ## Open issues
 
-### Pixel clock is capped at 12 MHz by Wi-Fi (revisit after Phase 4)
+### Pixel clock: 16 MHz works with 36-line bounce buffers (resolved 2026-10-02)
 
-- **Symptom:** 16 MHz pclk (~25 Hz refresh) looks clearly better than 12 MHz (~18 Hz, thin
-  lines and dark shades shimmer), but at 16 MHz Wi-Fi never connects, even in STA mode to a
-  nearby router with nothing metal near the antenna (status 6/4 forever). 12 MHz works for
-  STA, HTTPS and the setup AP.
-- **Likely cause: PSRAM contention.** The RGB panel has no memory of its own, so the S3
-  streams the whole 720×720 frame from PSRAM all the time (about 32 MB/s at 16 MHz). The
-  precompiled pioarduino framework has `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` (Wi-Fi/lwIP
-  buffers in PSRAM) and `CONFIG_SPIRAM_SPEED=80`, so Wi-Fi competes with the scan-out. That's
-  the framework default for S3 + PSRAM, not something this port changed. The C3 had no PSRAM,
-  and the GC9A01 had its own GRAM. RF interference from the panel bus isn't ruled out.
-- **Fix to try if the shimmer still matters after Phase 4** (thicker lines may hide it):
-  1. `custom_sdkconfig` in `platformio.ini` with `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`.
-     pioarduino then recompiles the Arduino framework (first build 10–30 min, downloads
-     ESP-IDF, can hit Windows long-path or antivirus locks). Internal RAM is ~28% used, so
-     there's room. Then retest 16 MHz with `qualia_panel_test`.
-  2. If still not enough: PSRAM at 120 MHz (experimental for octal PSRAM on S3).
-  3. If 16 MHz still fails after both, it's probably RF and 12 MHz is the limit.
-- If only the setup AP stays fragile: the runtime-pclk fallback in the Phase 3 notes (drop
-  to 8 MHz while the portal is open).
+- **Was:** at 16 MHz pclk (~25 Hz refresh) with 10-line bounce buffers, Wi-Fi never connected,
+  even in STA mode (status 6/4), and the setup AP was unusable. 12 MHz (~18 Hz) worked but thin
+  lines and dark shades shimmered.
+- **Fix:** `kPanelBounceBufferPx = 720 * 36`, from pvanbaren's port of the same board (see
+  `docs/improvements-plan.md`). Nothing else changed: same Arduino_GFX path, same prebuilt
+  framework, `pclk_active_neg` still 1. 20 lines was never tried at 16 MHz, so the minimum
+  that works isn't known.
+- **Verified on hardware:** panel test 9/9 fetches; full firmware runs for minutes with
+  fetches ~1.2 s, range changes with NVS saves cause no frame roll, hold-UP reset into the
+  setup AP joins quickly with no drops, and it reconnects to STA after setup. Text and fine
+  detail look clearer.
+- **Costs:** the two bounce buffers take 103.7 KB of internal RAM (46 KB more than 20 lines).
+  Internal heap: 94 KB free, 46 KB minimum, 35 KB largest block in normal running; 37 KB
+  minimum after the portal and reconnect. PSRAM draws are ~30% slower because the scan-out
+  reads PSRAM faster: draw ~140 ms empty and ~245 ms at 20 aircraft (was 107 and 185), present
+  ~110 ms (was 100).
+- **If Wi-Fi turns fragile again:** `custom_sdkconfig` with
+  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n` (pioarduino recompiles the framework, first build
+  10–30 min), then PSRAM at 120 MHz, then dropping pclk while the portal is open.
 
-### Frame roll with bounce buffers (2026-10-02, in test)
+### Frame roll with bounce buffers (2026-10-02, once since 36-line buffers; fix pending test)
 
 - **Symptom:** the whole image rolled up ~30-40 rows (N drawn under S) and stayed that way for
   minutes while the radar kept redrawing. It's a bounce-buffer refill slip (20-line buffers), and
   the framework's `CONFIG_LCD_RGB_RESTART_IN_VSYNC=y` didn't resync it.
 - **Likely triggers:** flash writes (NVS range save, Wi-Fi connect) while the RGB ISR isn't
   IRAM-safe, and PSRAM load from the 1 MB present copy.
-- **Test now:** `kPanelBounceBufferPx = 0` (direct PSRAM scan, DMA reset every VSYNC, so a slip
-  should last one frame). If that flickers, go back to 20 lines and rebuild the framework with
-  `custom_sdkconfig`: `CONFIG_LCD_RGB_ISR_IRAM_SAFE=y`, `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`,
-  `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`. Owning the
-  panel through esp_lcd with two framebuffers (no-copy present) would also remove the copy load.
+- **Status:** not seen at 16 MHz with 36-line buffers, including range changes with NVS saves
+  over several minutes (2026-10-02). The no-copy esp_lcd rewrite (`docs/improvements-plan.md`,
+  roadmap step 1) has since removed the 1 MB copy load.
+- **One slip after the rewrite:** in the panel test, the image shifted up right after Wi-Fi first
+  connected (the driver writes to flash then) and stayed shifted until reset. Minutes of running
+  and button presses didn't cause another. Fix: `setup()` calls `displayResync()`
+  (`esp_lcd_rgb_panel_restart()`, re-aligns at the next VSYNC) on `ARDUINO_EVENT_WIFI_STA_GOT_IP`;
+  the serial log prints `panel: scan-out resync`. **Not yet verified on hardware.**
+- **If slips show up at other times:** call `displayResync()` after those flash writes too, or
+  rebuild the framework with `custom_sdkconfig`: `CONFIG_LCD_RGB_ISR_IRAM_SAFE=y` (the actual
+  cause: the refill ISR can't run while flash is written), possibly with
+  `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`, `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`,
+  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`.
+
+### Wi-Fi credentials lost after a hold-UP reset (fixed 2026-10-02)
+
+- **Symptom:** after hold-UP reset and setup through the portal, the device connected, but the
+  next reboot had no saved credentials.
+- **Cause:** core 3.x picks credential storage (flash or RAM) each time Wi-Fi starts, from
+  `WiFi.persistent()`, and `WIFI_OFF` shuts Wi-Fi down fully. `eraseWifiCredentials()` left it
+  `false`, so the portal started Wi-Fi in RAM-only mode.
+- **Fix:** `eraseWifiCredentials()` sets `WiFi.persistent(true)` (the core default) when done.
+  Verified: hold-UP, setup, then RESET reconnects without the portal.
 
 ### Appearance tuning (later)
 

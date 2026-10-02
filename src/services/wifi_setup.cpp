@@ -155,7 +155,9 @@ void eraseWifiCredentials() {
   s_wm.resetSettings();
   s_wm.erase();
   WiFi.disconnect(true, true);
-  WiFi.persistent(false);
+  // Back to the core default. Storage is picked each time Wi-Fi starts: false here would
+  // keep the credentials entered in the portal after a reset in RAM only, lost on reboot.
+  WiFi.persistent(true);
 
   WiFi.mode(WIFI_OFF);
   delay(100);
