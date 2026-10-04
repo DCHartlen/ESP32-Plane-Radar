@@ -67,7 +67,12 @@ constexpr uint16_t kPanelVsyncPolarity = 1;
 constexpr uint16_t kPanelVsyncFrontPorch = 50;
 constexpr uint16_t kPanelVsyncPulseWidth = 16;
 constexpr uint16_t kPanelVsyncBackPorch = 16;
-constexpr uint16_t kPanelPclkActiveNeg = 1;
+/**
+ * Which pclk edge the panel latches data on. 1 showed flickering single-pixel speckles at
+ * high-contrast edges (bright icons, runway lines on navy) at 16 MHz; 0 fixed it on
+ * hardware (2026-10-04). pvanbaren's port of the same board uses 0 too.
+ */
+constexpr uint16_t kPanelPclkActiveNeg = 0;
 
 /**
  * Refresh = pclk / (812 * 802): 12 MHz ~18 Hz (dark shades flicker on hardware),

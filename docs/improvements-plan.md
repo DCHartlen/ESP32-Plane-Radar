@@ -1,6 +1,6 @@
 # Improvements plan (after the Qualia port)
 
-Status: **roadmap step 1 (faster display output) done 2026-10-02; the rest not started.** This plan collects what the
+Status: **roadmap step 1 (faster display output) done 2026-10-02; the rest not started. Roadmap reordered 2026-10-02: visual pass, then decluttering, then smooth motion.** This plan collects what the
 upstream forks have built, picks what's worth bringing over to the 720×720 Qualia build, and
 includes the auto-brightness plan.
 
@@ -31,8 +31,8 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
   - `num_fbs = 2`: needed for the no-copy present below. Arduino_GFX hard-codes 1.
   - `dma_burst_size = 64`: **already the same.** It shares a union with `psram_trans_align`,
     which Arduino_GFX sets to 64.
-  - `pclk_active_neg = 0` (ours is 1): not needed for 16 MHz. Only worth trying if fine detail
-    shimmers.
+  - `pclk_active_neg = 0` (ours was 1). **Adopted 2026-10-04:** after the visual pass, 1
+    showed flickering single-pixel speckles at high-contrast edges; 0 fixed it.
   - `periph_module_reset(PERIPH_LCD_CAM_MODULE)` before init, and `esp_lcd_rgb_panel_restart()`
     after, so a warm reboot doesn't shift the image vertically. Done with the no-copy present.
   - `WiFi.setSleep(WIFI_PS_NONE)`: we already do this. `WiFi.setTxPower(WIFI_POWER_8_5dBm)` isn't
@@ -60,7 +60,7 @@ buttons. See its `docs/qualia_display.md`, `src/hardware/qualia_rgb.cpp` and
 | Feature | Forks | Fits 720 px? |
 |---|---|---|
 | Color by altitude (warm low, cool high) | selmapi, tbirdrv | Yes. A color lookup. |
-| Fading trails behind aircraft | selmapi (64×8 ring buffer), GCamilleri, RubenKremer, JoaoCostaIFG, blinkidy | Yes. Cheap line draws; RAM isn't an issue on the S3. |
+| Fading trails behind aircraft | selmapi (64×8 ring buffer), GCamilleri, RubenKremer, JoaoCostaIFG, blinkidy | Technically yes, but **not wanted** (decided 2026-10-02). |
 | Themes (green CRT, amber, submarine red, navy "CIC" scope with bearing ring and ticks) | selmapi | Yes. Colors already live in `radar_theme.h`. The ring and ticks suit 720 px better than 240. |
 | Label decluttering (move tags to open space, rank-limit tags per range, rotate details when crowded) | blinkidy (most complete), benyaffe, GCamilleri/stewartallen, aroyer-qc | Yes, and it's needed: tag overlap is an open item in the port plan. |
 | Plane icons by type (jet, light plane, spinning helicopter, balloon) | timclarke07, vfranchi | Partly. They're 10–16 px bitmaps; redo as polygons through `ui::px()` or regenerate larger. |
@@ -91,21 +91,35 @@ pixels they blend onto) before caching anything.
 
 ## Roadmap
 
+Implementation details for steps 2–6 are in `docs/roadmap-plan.md`.
+
 1. **Faster display output** (pvanbaren). **Done 2026-10-02, verified on hardware:** 16 MHz
    with 36-line bounce buffers, the panel owned through `esp_lcd` with two framebuffers and a
    no-copy swap, LCD_CAM reset, and a scan-out resync on Wi-Fi connect. Checked: present time,
-   colors, spinner, Wi-Fi and setup AP, warm reboot. Not adopted: `pclk_active_neg = 0` (only
-   if fine detail shimmers) and `setTxPower`.
-2. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task (their fetch task
+   colors, spinner, Wi-Fi and setup AP, warm reboot. Not adopted: `setTxPower`.
+   `pclk_active_neg = 0` was adopted later (2026-10-04) to fix flickering edge speckles.
+2. **Visual pass: altitude colour, icons by type, home marker.** These share the aircraft-drawing
+   code in `radar_display.cpp`, so they go together. Decided 2026-10-02: no trails.
+   - **Altitude colour** (selmapi, tbirdrv). A lookup from `alt_baro` to a warm-low, cool-high
+     gradient that tints each icon. Ground and unknown altitude get their own neutral color.
+   - **Icons by type.** Polygons drawn through `ui::px()` and rotated to `track_deg`, not the
+     forks' 10–16 px bitmaps. Shapes: jet, light plane, helicopter, balloon, plus a fallback. The
+     shape comes from the ADS-B `category`/type field; check that `Aircraft` carries it and add it
+     to the parser if not.
+   - **Home marker.** A filled house polygon at the radar center, drawn with the grid layer.
+   - Keep each icon's size in one constant, and the house's too: decluttering (step 3) uses them
+     as obstacle boxes.
+3. **Label decluttering** (blinkidy). Closes the tag-overlap item in the port plan. Treat the home
+   marker and an icon-sized box per aircraft as obstacles. Keep it stable: a tag keeps its slot
+   until it actually collides, so it won't jump once motion is smooth.
+4. **Smooth motion** (pvanbaren). Move the ADS-B fetch to a background task (their fetch task
    fills the aircraft list under a mutex; drawing takes a snapshot per frame), dead-reckon between
    fetches with `seen_pos`, and redraw every 250 ms instead of after each fetch. Settle first:
    `adsb_client`'s `PollFn` (portal servicing during a fetch), Wi-Fi drop handling and
    `invalidate()`, and applying a range change on the next frame.
-3. **Label decluttering** (blinkidy). Closes the tag-overlap item in the port plan.
-4. **Color by altitude and fading trails** (selmapi). Cheap and noticeable.
 5. **Auto-brightness** (below). Independent of 1–4; can be done any time.
-6. **Optional later:** emergency/military highlights, climb arrows, icons by type, themes, sweep
-   (after 1), water or land background, route labels, clock.
+6. **Optional later:** emergency/military highlights, climb arrows, themes, sweep (after 1),
+   water or land background, route labels, clock.
 
 ## Auto-brightness
 
