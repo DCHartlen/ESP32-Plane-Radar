@@ -216,6 +216,11 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
   minimum after the portal and reconnect. PSRAM draws are ~30% slower because the scan-out
   reads PSRAM faster: draw ~140 ms empty and ~245 ms at 20 aircraft (was 107 and 185), present
   ~110 ms (was 100).
+- **Later (2026-10-04): `pclk_active_neg` 1 → 0.** After the visual pass (bright altitude
+  colours, polygon icons), flickering single-pixel speckles showed at high-contrast edges:
+  icons, runway and grid lines on the navy background. They flickered rather than repeating
+  frame to frame, so a marginal latch edge, not drawing. Switching to the other edge (as
+  pvanbaren uses) fixed it on hardware.
 - **If Wi-Fi turns fragile again:** `custom_sdkconfig` with
   `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n` (pioarduino recompiles the framework, first build
   10–30 min), then PSRAM at 120 MHz, then dropping pclk while the portal is open.
@@ -260,6 +265,7 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 - **Tag overlap:** in dense traffic (CYYZ departures) the three-line tags overlap each other
   and nearby symbols. This is pre-existing behavior, made more visible by the larger text. It
   needs a decluttering pass (for example, flip a tag to the other side or drop lines on collision).
+  Implemented 2026-10-04 as roadmap phase C (`ui/tag_layout`); not yet checked on hardware.
 - **Heading vs track:** the arrow uses heading (true, else magnetic) and the line uses ground
   track, so they differ by the crab angle, plus ~10° declination when only `mag_heading` is
   reported. Option: draw the arrow along the track.

@@ -25,15 +25,17 @@ struct RangePreset {
    * groundspeed and track. Longer at wider ranges so a jet's line stays ~80–100 px.
    */
   float track_horizon_s;
+  /** The nearest this many aircraft get a full tag; the rest get the callsign only. */
+  uint8_t max_full_tags;
 };
 
 constexpr float kRing3ToOuterKm = 4.0f / 3.0f;
 
 constexpr RangePreset kRangePresets[] = {
-    {5.0f, 5.0f * kRing3ToOuterKm, 15.0f},
-    {10.0f, 10.0f * kRing3ToOuterKm, 25.0f},
-    {15.0f, 15.0f * kRing3ToOuterKm, 40.0f},
-    {25.0f, 25.0f * kRing3ToOuterKm, 60.0f},
+    {5.0f, 5.0f * kRing3ToOuterKm, 15.0f, 12},
+    {10.0f, 10.0f * kRing3ToOuterKm, 25.0f, 10},
+    {15.0f, 15.0f * kRing3ToOuterKm, 40.0f, 8},
+    {25.0f, 25.0f * kRing3ToOuterKm, 60.0f, 6},
 };
 
 constexpr size_t kRangePresetCount =

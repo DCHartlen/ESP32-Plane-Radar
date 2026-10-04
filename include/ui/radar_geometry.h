@@ -2,6 +2,14 @@
 
 namespace ui::radar {
 
+/** Screen rectangle: top-left corner and size, in px. */
+struct ScreenRect {
+  int left;
+  int top;
+  int w;
+  int h;
+};
+
 /**
  * Lat/lon to screen projection shared by the aircraft and runway layers.
  * Equirectangular: dx = Δlon·kKmPerDeg·cos(center_lat), dy = Δlat·kKmPerDeg.

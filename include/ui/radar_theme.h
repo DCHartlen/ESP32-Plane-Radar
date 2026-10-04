@@ -62,8 +62,13 @@ constexpr float kRunwayLineWidthPx = pxF(2.0f);
 constexpr float kRunwayLineHalfWidth = kRunwayLineWidthPx * 0.5f;
 constexpr int kRunwayLabelHeightPx = kCardinalLabelHeightPx;
 constexpr int kRunwayLabelGapPx = px(3);
-/** Gap from triangle edge to tag block (px). */
+/** Gap from the icon's radius to its tag (px). */
 constexpr int kAircraftLabelGapPx = px(1);
+/**
+ * Every corner of a tag stays within this radius of the centre, so the round bezel can't
+ * hide part of it. A guess at the visible circle; measure it on the panel.
+ */
+constexpr int kTagScreenRadiusPx = kCenterX - px(2);
 /** Keep symbol centroid inside outer ring by at least this inset (px). */
 constexpr int kAircraftInsideRingInsetPx = kAircraftIconMaxRadiusPx + px(1);
 

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 #include "data/large_airports.h"
 #include "hardware/display_font.h"
@@ -44,12 +45,41 @@ struct Segment {
   bool merged;  // folded into another segment; not drawn
 };
 
-bool s_in_range[data::large_airports::kAirportCount];
-bool s_label_pending[data::large_airports::kAirportCount];
-Box s_runway_box[data::large_airports::kAirportCount];
+/** An airport with drawn runways, and the box its label goes beside. */
+struct LabelledAirport {
+  uint16_t airport_idx;
+  Box box;
+};
+
+/** One bit per airport: within the fetch radius this frame. A bitset keeps internal RAM free. */
+uint32_t s_in_range[(data::large_airports::kAirportCount + 31) / 32];
+LabelledAirport s_labelled[kMaxAirportLabels];
+size_t s_labelled_count = 0;
 Segment s_segments[kMaxRunwaySegments];
+radar::ScreenRect s_label_boxes[kMaxAirportLabels];
+size_t s_label_box_count = 0;
 
 float e7ToDeg(int32_t e7) { return static_cast<float>(e7) * 1e-7f; }
+
+bool inRange(uint16_t ap_idx) { return (s_in_range[ap_idx / 32] >> (ap_idx % 32)) & 1u; }
+
+void setInRange(uint16_t ap_idx) { s_in_range[ap_idx / 32] |= 1u << (ap_idx % 32); }
+
+/** The airport's label entry, added on first use; nullptr once the label table is full. */
+LabelledAirport* labelledAirport(uint16_t ap_idx) {
+  for (size_t i = 0; i < s_labelled_count; ++i) {
+    if (s_labelled[i].airport_idx == ap_idx) {
+      return &s_labelled[i];
+    }
+  }
+  if (s_labelled_count >= kMaxAirportLabels) {
+    return nullptr;
+  }
+  LabelledAirport* entry = &s_labelled[s_labelled_count++];
+  entry->airport_idx = ap_idx;
+  entry->box = {INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN};
+  return entry;
+}
 
 bool segmentIntersectsDisc(int x0, int y0, int x1, int y1) {
   const int cx = radar::kCenterX;
@@ -145,6 +175,9 @@ void drawAirportLabel(lgfx::LGFXBase& gfx, const char* ident, const Box& box) {
   int left = 0;
   int top = 0;
   placeLabelBesideBox(box, w, h, &left, &top);
+  if (s_label_box_count < kMaxAirportLabels) {
+    s_label_boxes[s_label_box_count++] = {left, top, w, h};
+  }
 
   gfx.fillRect(left, top, w, h, radar::kColorBackground);
   gfx.setTextDatum(textdatum_t::top_left);
@@ -243,18 +276,14 @@ void mergeCloseParallels(Segment* segs, size_t count) {
 }  // namespace
 
 void drawLargeAirportRunways(lgfx::LGFXBase& gfx) {
+  s_label_box_count = 0;
   if (!radar::showRunways()) {
     return;
   }
   const float radius_km = radar::fetchRadiusKm();
 
-  uint16_t label_airports[kMaxAirportLabels];
-  size_t label_count = 0;
-
-  for (size_t i = 0; i < data::large_airports::kAirportCount; ++i) {
-    s_in_range[i] = false;
-    s_label_pending[i] = false;
-  }
+  memset(s_in_range, 0, sizeof(s_in_range));
+  s_labelled_count = 0;
 
   size_t seg_count = 0;
   for (size_t i = 0; i < data::large_airports::kRunwayCount &&
@@ -262,16 +291,18 @@ void drawLargeAirportRunways(lgfx::LGFXBase& gfx) {
        ++i) {
     const auto& rw = data::large_airports::kRunways[i];
     const uint16_t ap_idx = rw.airport_idx;
-    if (!s_in_range[ap_idx]) {
+    if (!inRange(ap_idx)) {
       const auto& ap = data::large_airports::kAirports[ap_idx];
       float dx_km = 0.0f;
       float dy_km = 0.0f;
       float dist_km = 0.0f;
       offsetKmFromCenter(e7ToDeg(ap.lat_e7), e7ToDeg(ap.lon_e7), &dx_km, &dy_km,
                          &dist_km);
-      s_in_range[ap_idx] = (dist_km <= radius_km);
+      if (dist_km <= radius_km) {
+        setInRange(ap_idx);
+      }
     }
-    if (s_in_range[ap_idx] && runwaySegment(rw, &s_segments[seg_count])) {
+    if (inRange(ap_idx) && runwaySegment(rw, &s_segments[seg_count])) {
       ++seg_count;
     }
   }
@@ -283,33 +314,30 @@ void drawLargeAirportRunways(lgfx::LGFXBase& gfx) {
     if (seg.merged) {
       continue;
     }
-    const uint16_t ap_idx = seg.airport_idx;
     gfx.drawWideLine(static_cast<int>(seg.x0), static_cast<int>(seg.y0),
                      static_cast<int>(seg.x1), static_cast<int>(seg.y1),
                      radar::kRunwayLineHalfWidth, radar::kColorRunway);
-    if (!s_label_pending[ap_idx]) {
-      s_runway_box[ap_idx] = {INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN};
+    LabelledAirport* airport = labelledAirport(seg.airport_idx);
+    if (airport == nullptr) {
+      continue;
     }
-    expandBox(&s_runway_box[ap_idx], static_cast<int>(seg.x0),
-              static_cast<int>(seg.y0));
-    expandBox(&s_runway_box[ap_idx], static_cast<int>(seg.x1),
-              static_cast<int>(seg.y1));
-    if (!s_label_pending[ap_idx] && label_count < kMaxAirportLabels) {
-      s_label_pending[ap_idx] = true;
-      label_airports[label_count++] = ap_idx;
-    }
+    expandBox(&airport->box, static_cast<int>(seg.x0), static_cast<int>(seg.y0));
+    expandBox(&airport->box, static_cast<int>(seg.x1), static_cast<int>(seg.y1));
   }
 
-  if (label_count == 0) {
+  if (s_labelled_count == 0) {
     return;
   }
 
   displayFontApply(gfx, radar::kRunwayLabelHeightPx);
-  for (size_t i = 0; i < label_count; ++i) {
-    const uint16_t ap_idx = label_airports[i];
-    drawAirportLabel(gfx, data::large_airports::kAirports[ap_idx].ident,
-                     s_runway_box[ap_idx]);
+  for (size_t i = 0; i < s_labelled_count; ++i) {
+    drawAirportLabel(gfx, data::large_airports::kAirports[s_labelled[i].airport_idx].ident,
+                     s_labelled[i].box);
   }
 }
+
+size_t airportLabelCount() { return s_label_box_count; }
+
+radar::ScreenRect airportLabelBox(size_t i) { return s_label_boxes[i]; }
 
 }  // namespace ui::runway
