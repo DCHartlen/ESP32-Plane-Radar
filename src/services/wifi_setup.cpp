@@ -16,6 +16,7 @@
 
 #include "config.h"
 #include "hardware/buttons.h"
+#include "services/clock.h"
 #include "services/radar_location.h"
 #include "ui/radar_range.h"
 #include "ui/status_screens.h"
@@ -59,6 +60,47 @@ char s_runways_checkbox_attrs[32] = "type=\"checkbox\"";
 WiFiManagerParameter s_param_runways("show_runways", "Show airport runways", "T", 2,
                                      s_runways_checkbox_attrs, WFM_LABEL_AFTER);
 
+// Time zone: WiFiManager only renders <input>s, so the value travels in a hidden input
+// that a <select> (custom HTML, rebuilt with the current zone selected) writes into.
+constexpr int kTimeZoneParamLen = 4;  // "auto" or a zone index
+constexpr char kTimeZoneParamId[] = "time_zone";
+WiFiManagerParameter s_param_tz(kTimeZoneParamId, "Time zone", "auto", kTimeZoneParamLen,
+                                " type=\"hidden\"");
+char s_tz_select_html[3072] = "";  // ~2.4 KB with the current zone list
+WiFiManagerParameter s_param_tz_select(s_tz_select_html);
+
+char s_hour24_checkbox_attrs[32] = "type=\"checkbox\"";
+WiFiManagerParameter s_param_hour24("hour24", "24-hour clock", "T", 2, s_hour24_checkbox_attrs,
+                                    WFM_LABEL_AFTER);
+
+void buildTimeZoneSelect() {
+  const bool automatic = services::clock::zoneAutomatic();
+  const size_t current = services::clock::currentZoneIndex();
+  size_t used = 0;
+  const auto append = [&](const char* fmt, auto... args) {
+    if (used < sizeof(s_tz_select_html)) {
+      const int n = snprintf(s_tz_select_html + used, sizeof(s_tz_select_html) - used, fmt,
+                             args...);
+      if (n > 0) {
+        used += static_cast<size_t>(n);
+      }
+    }
+  };
+  append("<select onchange=\"document.getElementById('%s').value=this.value\" "
+         "style=\"width:100%%;padding:5px;margin:5px 0 10px\">",
+         kTimeZoneParamId);
+  append("<option value=\"auto\"%s>Automatic (from radar location)</option>",
+         automatic ? " selected" : "");
+  for (size_t i = 0; i < services::clock::zoneCount(); ++i) {
+    append("<option value=\"%u\"%s>%s</option>", static_cast<unsigned>(i),
+           !automatic && i == current ? " selected" : "", services::clock::zoneLabel(i));
+  }
+  append("</select>");
+  if (used >= sizeof(s_tz_select_html)) {
+    Serial.println("Portal: time zone list truncated; enlarge s_tz_select_html");
+  }
+}
+
 void refreshPortalParamDefaults() {
   char lat_buf[kCoordParamLen + 1];
   char lon_buf[kCoordParamLen + 1];
@@ -72,6 +114,19 @@ void refreshPortalParamDefaults() {
   snprintf(s_runways_checkbox_attrs, sizeof(s_runways_checkbox_attrs),
            "type=\"checkbox\"%s", ui::radar::showRunways() ? " checked" : "");
   s_param_runways.setValue("T", 2);
+
+  char tz_buf[kTimeZoneParamLen + 1];
+  if (services::clock::zoneAutomatic()) {
+    snprintf(tz_buf, sizeof(tz_buf), "auto");
+  } else {
+    snprintf(tz_buf, sizeof(tz_buf), "%u",
+             static_cast<unsigned>(services::clock::currentZoneIndex()));
+  }
+  s_param_tz.setValue(tz_buf, kTimeZoneParamLen);
+  buildTimeZoneSelect();
+  snprintf(s_hour24_checkbox_attrs, sizeof(s_hour24_checkbox_attrs), "type=\"checkbox\"%s",
+           services::clock::use24Hour() ? " checked" : "");
+  s_param_hour24.setValue("T", 2);
 }
 
 void onPortalParamsSaved() {
@@ -81,6 +136,8 @@ void onPortalParamsSaved() {
   }
   ui::radar::saveMilesFromPortal(s_param_miles.getValue());
   ui::radar::saveRunwaysFromPortal(s_param_runways.getValue());
+  services::clock::saveFromPortal(s_param_tz.getValue(), s_param_hour24.getValue());
+  refreshPortalParamDefaults();
 }
 
 void attachPortalParams(WiFiManager& wm) {
@@ -89,6 +146,9 @@ void attachPortalParams(WiFiManager& wm) {
   wm.addParameter(&s_param_lon);
   wm.addParameter(&s_param_miles);
   wm.addParameter(&s_param_runways);
+  wm.addParameter(&s_param_tz);
+  wm.addParameter(&s_param_tz_select);
+  wm.addParameter(&s_param_hour24);
   wm.setSaveParamsCallback(onPortalParamsSaved);
 }
 
@@ -168,7 +228,8 @@ void resetWifiCredentials() {
   eraseWifiCredentials();
   services::location::clear();
   ui::radar::unitsReset();
-  Serial.println("WiFi credentials, location, and units cleared");
+  services::clock::reset();
+  Serial.println("WiFi credentials, location, units and clock cleared");
 }
 
 void onConfigPortalApStarted(WiFiManager*) {

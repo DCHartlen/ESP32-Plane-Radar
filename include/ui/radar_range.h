@@ -20,15 +20,20 @@ struct RangePreset {
   /** Distance shown on ring 3 (¾ of outer radius), always stored in km. */
   float ring3_km;
   float outer_km;
+  /**
+   * Speed vector: from the aircraft to where it will be after this many seconds at its
+   * groundspeed and track. Longer at wider ranges so a jet's line stays ~80–100 px.
+   */
+  float track_horizon_s;
 };
 
 constexpr float kRing3ToOuterKm = 4.0f / 3.0f;
 
 constexpr RangePreset kRangePresets[] = {
-    {5.0f, 5.0f * kRing3ToOuterKm},
-    {10.0f, 10.0f * kRing3ToOuterKm},
-    {15.0f, 15.0f * kRing3ToOuterKm},
-    {25.0f, 25.0f * kRing3ToOuterKm},
+    {5.0f, 5.0f * kRing3ToOuterKm, 15.0f},
+    {10.0f, 10.0f * kRing3ToOuterKm, 25.0f},
+    {15.0f, 15.0f * kRing3ToOuterKm, 40.0f},
+    {25.0f, 25.0f * kRing3ToOuterKm, 60.0f},
 };
 
 constexpr size_t kRangePresetCount =

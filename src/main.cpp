@@ -11,6 +11,7 @@
 #include "hardware/display.h"
 #include "hardware/panel_test.h"
 #include "services/adsb_client.h"
+#include "services/clock.h"
 #include "services/radar_location.h"
 #include "services/wifi_setup.h"
 #include "ui/radar_display.h"
@@ -23,6 +24,7 @@ bool g_radar_visible = false;
 unsigned long g_wifi_down_since = 0;
 unsigned long g_last_reconnect_ms = 0;
 unsigned long g_last_adsb_fetch_ms = 0;
+int g_drawn_minute = -1;  // clock minute on screen, so a minute change redraws
 
 void showRadarIfConnected() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -99,6 +101,7 @@ void setup() {
   }
   services::location::init();
   ui::radar::rangeInit();
+  services::clock::init();
   services::adsb::setPollFn(wifiLoop);
 
   if (wifiSetupConnect()) {
@@ -133,12 +136,19 @@ void loop() {
     }
   } else {
     g_wifi_down_since = 0;
+    services::clock::loop();
+    // Read before drawing: if the minute ticks over mid-frame, the next pass redraws.
+    const int minute = services::clock::minuteOfDay();
     if (!g_radar_visible) {
       showRadarIfConnected();
     } else if (millis() - g_last_adsb_fetch_ms >= config::kAdsbFetchIntervalMs) {
       g_last_adsb_fetch_ms = millis();
       fetchAndDrawAircraft();
+    } else if (minute != g_drawn_minute) {
+      // Frames normally come every fetch; this keeps the clock from lagging up to 5 s.
+      ui::radarDisplayDraw();
     }
+    g_drawn_minute = minute;
   }
 
   delay(10);

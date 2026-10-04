@@ -100,6 +100,14 @@ constexpr unsigned long kAdsbStaleAfterMs = 30000;
 constexpr float kAdsbFetchRadiusScale = 1.0f;
 /** false = hide aircraft with alt_baro "ground"; true = show them too. */
 constexpr bool kAdsbShowGroundAircraft = false;
+/** Log every parsed aircraft's fields (category, altitude, rate, squawk, ...) per fetch. */
+constexpr bool kAdsbLogFields = false;
+
+// --- Clock ---
+constexpr char kNtpServer1[] = "pool.ntp.org";
+constexpr char kNtpServer2[] = "time.google.com";
+/** Automatic time zone: wait this long before retrying a failed location lookup. */
+constexpr unsigned long kClockZoneRetryMs = 60000;
 
 // --- UI colors (RGB565) — status screens ---
 constexpr uint16_t kColorBlack = 0x0000;

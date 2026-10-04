@@ -191,36 +191,95 @@ void copyJsonStringTrimmed(const JsonObject& obj, const char* key, char* out,
   out[n] = '\0';
 }
 
-void formatAltitudeTag(const JsonObject& plane, char* out, size_t out_len) {
-  out[0] = '\0';
-  if (out_len == 0) {
+void parseAltitude(Aircraft* ac, const JsonObject& plane) {
+  ac->alt_state = AltState::Unknown;
+  ac->alt_ft = 0;
+  if (isOnGround(plane)) {
+    ac->alt_state = AltState::Ground;
     return;
   }
-
-  if (plane["alt_baro"].is<const char*>()) {
-    const char* s = plane["alt_baro"].as<const char*>();
-    if (strcmp(s, "ground") == 0) {
-      strncpy(out, "GND", out_len - 1);
-      out[out_len - 1] = '\0';
-      return;
-    }
-  }
-
   float alt = 0.0f;
-  if (readJsonFloat(plane, "alt_baro", &alt) ||
-      readJsonFloat(plane, "alt_geom", &alt)) {
-    snprintf(out, out_len, "%d ft", static_cast<int>(lroundf(alt)));
+  if (readJsonFloat(plane, "alt_baro", &alt) || readJsonFloat(plane, "alt_geom", &alt)) {
+    ac->alt_state = AltState::Airborne;
+    ac->alt_ft = static_cast<int32_t>(lroundf(alt));
   }
 }
 
+void formatAltitudeTag(const Aircraft& ac, char* out, size_t out_len) {
+  switch (ac.alt_state) {
+    case AltState::Ground:
+      snprintf(out, out_len, "GND");
+      break;
+    case AltState::Airborne:
+      snprintf(out, out_len, "%ld ft", static_cast<long>(ac.alt_ft));
+      break;
+    case AltState::Unknown:
+      out[0] = '\0';
+      break;
+  }
+}
+
+void parseVerticalRate(Aircraft* ac, const JsonObject& plane) {
+  float rate = 0.0f;
+  ac->has_vrate =
+      readJsonFloat(plane, "baro_rate", &rate) || readJsonFloat(plane, "geom_rate", &rate);
+  ac->vrate_fpm = ac->has_vrate
+                      ? static_cast<int16_t>(std::max(-32000.0f, std::min(32000.0f, rate)))
+                      : 0;
+}
+
+uint8_t parseCategory(const JsonObject& plane) {
+  if (!plane["category"].is<const char*>()) {
+    return kCategoryUnknown;
+  }
+  const char* s = plane["category"].as<const char*>();
+  if (s[0] < 'A' || s[0] > 'D' || s[1] < '0' || s[1] > '7' || s[2] != '\0') {
+    return kCategoryUnknown;
+  }
+  return categoryCode(s[0], static_cast<uint8_t>(s[1] - '0'));
+}
+
+Emergency parseEmergency(const JsonObject& plane) {
+  if (!plane["emergency"].is<const char*>()) {
+    return Emergency::Unknown;
+  }
+  const char* s = plane["emergency"].as<const char*>();
+  struct Entry {
+    const char* name;
+    Emergency value;
+  };
+  static constexpr Entry kEntries[] = {
+      {"none", Emergency::None},         {"general", Emergency::General},
+      {"lifeguard", Emergency::Lifeguard}, {"minfuel", Emergency::MinFuel},
+      {"nordo", Emergency::NoRadio},     {"unlawful", Emergency::Unlawful},
+      {"downed", Emergency::Downed},
+  };
+  for (const Entry& e : kEntries) {
+    if (strcmp(s, e.name) == 0) {
+      return e.value;
+    }
+  }
+  return Emergency::Unknown;
+}
+
 void fillTagFields(Aircraft* ac, const JsonObject& plane) {
+  copyJsonStringTrimmed(plane, "hex", ac->hex, sizeof(ac->hex));
   copyJsonStringTrimmed(plane, "flight", ac->callsign, sizeof(ac->callsign));
   if (ac->callsign[0] == '\0') {
     copyJsonStringTrimmed(plane, "hex", ac->callsign, sizeof(ac->callsign));
   }
 
   copyJsonStringTrimmed(plane, "t", ac->type, sizeof(ac->type));
-  formatAltitudeTag(plane, ac->alt, sizeof(ac->alt));
+  copyJsonStringTrimmed(plane, "squawk", ac->squawk, sizeof(ac->squawk));
+  parseAltitude(ac, plane);
+  formatAltitudeTag(*ac, ac->alt, sizeof(ac->alt));
+  parseVerticalRate(ac, plane);
+  ac->category = parseCategory(plane);
+  ac->emergency = parseEmergency(plane);
+  ac->db_flags = plane["dbFlags"].is<int>() ? static_cast<uint8_t>(plane["dbFlags"].as<int>())
+                                            : 0;
+  ac->seen_pos_s = 0.0f;
+  readJsonFloat(plane, "seen_pos", &ac->seen_pos_s);
 }
 
 }  // namespace
@@ -329,6 +388,13 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
     s_aircraft[n].has_track = pickTrackHeading(plane, &s_aircraft[n].track_deg);
     s_aircraft[n].gs_knots = pickGroundSpeed(plane);
     fillTagFields(&s_aircraft[n], plane);
+    if (config::kAdsbLogFields) {
+      const Aircraft& a = s_aircraft[n];
+      Serial.printf("  %s %-8s %-4s cat %02X alt %d/%ld vr %d sq %s em %u db %02X age %.1f\n",
+                    a.hex, a.callsign, a.type, a.category, static_cast<int>(a.alt_state),
+                    static_cast<long>(a.alt_ft), a.has_vrate ? a.vrate_fpm : 0, a.squawk,
+                    static_cast<unsigned>(a.emergency), a.db_flags, a.seen_pos_s);
+    }
     ++n;
   }
 
