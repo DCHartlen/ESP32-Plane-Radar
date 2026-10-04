@@ -74,8 +74,8 @@ bool isInsideOuterRing(int x, int y) {
   return distSqFromCenter(x, y) <= max_r * max_r;
 }
 
-/** Rim dot from true bearing; always on screen edge (even if target is 50+ km away). */
-bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
+/** Rim marker from true bearing; always on screen edge (even if target is 50+ km away). */
+bool beyondRingMarkerFromLatLon(float lat, float lon, int* out_x, int* out_y) {
   float dx_km = 0.0f;
   float dy_km = 0.0f;
   float dist_km = 0.0f;
@@ -89,9 +89,9 @@ bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
 
   const int cx = radar::kCenterX;
   const int cy = radar::kCenterY;
-  // Inset by the dot radius too, so the whole dot stays inside the round screen.
+  // Inset by the marker radius too, so the whole marker stays inside the round screen.
   const int rim_r = radar::kCenterX - radar::kBeyondRingScreenMarginPx -
-                    radar::kBeyondRingDotRadiusPx;
+                    radar::kBeyondRingMarkerRadiusPx;
   const float angle_rad = atan2f(dx_km, dy_km);
 
   *out_x = cx + static_cast<int>(lroundf(sinf(angle_rad) * rim_r));
@@ -99,9 +99,42 @@ bool beyondRingEdgeDotFromLatLon(float lat, float lon, int* out_x, int* out_y) {
   return true;
 }
 
-void drawBeyondRingDot(int x, int y) {
-  canvas.fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx,
-                         radar::kColorAircraft);
+/** Notched arrow centred on (x, y), pointing along track_deg; a dot if there's no track to show. */
+void drawBeyondRingMarker(int x, int y, float track_deg, bool show_arrow) {
+  if (!show_arrow) {
+    canvas.fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx,
+                           radar::kColorAircraft);
+    return;
+  }
+
+  constexpr float kDegToRad = 0.01745329252f;
+  const float rad = track_deg * kDegToRad;
+  // Screen y grows downward: forward is (sin, -cos), right of forward is (cos, sin).
+  const float fx = sinf(rad);
+  const float fy = -cosf(rad);
+  const float rx = cosf(rad);
+  const float ry = sinf(rad);
+
+  const auto at = [&](float fwd, float right, int* out_x, int* out_y) {
+    *out_x = x + static_cast<int>(lroundf(fx * fwd + rx * right));
+    *out_y = y + static_cast<int>(lroundf(fy * fwd + ry * right));
+  };
+
+  constexpr float kTip = radar::kBeyondRingArrowTipLenPx;
+  constexpr float kBack = -static_cast<float>(radar::kBeyondRingArrowBackLenPx);
+  constexpr float kHalfW = radar::kBeyondRingArrowHalfWidthPx;
+  constexpr float kNotch = kBack + radar::kBeyondRingArrowNotchPx;
+
+  int tip_x, tip_y, left_x, left_y, right_x, right_y, notch_x, notch_y;
+  at(kTip, 0.0f, &tip_x, &tip_y);
+  at(kBack, -kHalfW, &left_x, &left_y);
+  at(kBack, kHalfW, &right_x, &right_y);
+  at(kNotch, 0.0f, &notch_x, &notch_y);
+
+  canvas.fillTriangle(tip_x, tip_y, left_x, left_y, notch_x, notch_y,
+                     radar::kColorAircraft);
+  canvas.fillTriangle(tip_x, tip_y, notch_x, notch_y, right_x, right_y,
+                     radar::kColorAircraft);
 }
 
 /** Screen length of the distance flown in kAircraftTrackHorizonSec at the current range. */
@@ -240,10 +273,12 @@ struct AircraftDrawItem {
   int dist_sq = 0;
 };
 
-struct BeyondDotDrawItem {
+struct BeyondRingDrawItem {
   int x = 0;
   int y = 0;
   int dist_sq = 0;
+  float track_deg = 0.0f;
+  bool show_arrow = false;  // has a track and is moving
 };
 
 void sortDrawItemsFarFirst(AircraftDrawItem* items, size_t count) {
@@ -258,9 +293,9 @@ void sortDrawItemsFarFirst(AircraftDrawItem* items, size_t count) {
   }
 }
 
-void sortBeyondDotsFarFirst(BeyondDotDrawItem* items, size_t count) {
+void sortBeyondRingFarFirst(BeyondRingDrawItem* items, size_t count) {
   for (size_t i = 1; i < count; ++i) {
-    const BeyondDotDrawItem key = items[i];
+    const BeyondRingDrawItem key = items[i];
     size_t j = i;
     while (j > 0 && items[j - 1].dist_sq < key.dist_sq) {
       items[j] = items[j - 1];
@@ -276,9 +311,9 @@ void drawAircraft() {
   const services::adsb::Aircraft* planes = services::adsb::aircraftList();
 
   AircraftDrawItem items[services::adsb::kMaxAircraft];
-  BeyondDotDrawItem dots[services::adsb::kMaxAircraft];
+  BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
   size_t draw_count = 0;
-  size_t dot_count = 0;
+  size_t rim_count = 0;
 
   for (size_t i = 0; i < n; ++i) {
     float dx_km = 0.0f;
@@ -298,21 +333,23 @@ void drawAircraft() {
       continue;
     }
 
-    int dot_x = 0;
-    int dot_y = 0;
-    if (!beyondRingEdgeDotFromLatLon(planes[i].lat, planes[i].lon, &dot_x,
-                                     &dot_y)) {
+    int rim_x = 0;
+    int rim_y = 0;
+    if (!beyondRingMarkerFromLatLon(planes[i].lat, planes[i].lon, &rim_x,
+                                    &rim_y)) {
       continue;
     }
-    dots[dot_count].x = dot_x;
-    dots[dot_count].y = dot_y;
-    dots[dot_count].dist_sq = distSqFromCenter(dot_x, dot_y);
-    ++dot_count;
+    rim[rim_count].x = rim_x;
+    rim[rim_count].y = rim_y;
+    rim[rim_count].dist_sq = distSqFromCenter(rim_x, rim_y);
+    rim[rim_count].track_deg = planes[i].track_deg;
+    rim[rim_count].show_arrow = planes[i].has_track && planes[i].gs_knots > 0.0f;
+    ++rim_count;
   }
 
-  sortBeyondDotsFarFirst(dots, dot_count);
-  for (size_t d = 0; d < dot_count; ++d) {
-    drawBeyondRingDot(dots[d].x, dots[d].y);
+  sortBeyondRingFarFirst(rim, rim_count);
+  for (size_t d = 0; d < rim_count; ++d) {
+    drawBeyondRingMarker(rim[d].x, rim[d].y, rim[d].track_deg, rim[d].show_arrow);
   }
 
   sortDrawItemsFarFirst(items, draw_count);
@@ -320,8 +357,10 @@ void drawAircraft() {
     const size_t i = items[d].index;
     const int x = items[d].x;
     const int y = items[d].y;
-    drawSpeedVector(x, y, planes[i].track_deg, planes[i].gs_knots,
-                    radar::kColorTrackVector);
+    if (planes[i].has_track) {
+      drawSpeedVector(x, y, planes[i].track_deg, planes[i].gs_knots,
+                      radar::kColorTrackVector);
+    }
     drawHeadingTriangle(x, y, planes[i].nose_deg, radar::kColorAircraft);
   }
   for (size_t d = 0; d < draw_count; ++d) {

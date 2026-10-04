@@ -59,8 +59,19 @@ constexpr int kAircraftLabelGapPx = px(1);
 constexpr int kAircraftInsideRingInsetPx =
     kAircraftNoseLenPx + kAircraftTailHalfPx + px(1);
 
-/** Beyond-ring traffic: bearing cues on screen rim (correct direction, fixed radius). */
+/**
+ * Beyond-ring traffic: a cue on the screen rim at the aircraft's bearing (fixed radius).
+ * Moving aircraft get a notched arrow pointing along their track, so it shows whether
+ * they're heading in or out; stationary ones (gs 0) and ones with no track get a plain dot.
+ */
 constexpr int kBeyondRingDotRadiusPx = px(4);
+constexpr int kBeyondRingArrowTipLenPx = px(6);
+constexpr int kBeyondRingArrowBackLenPx = px(4);
+constexpr int kBeyondRingArrowHalfWidthPx = px(4.5f);
+/** How far the notch cuts forward from the back corners. */
+constexpr int kBeyondRingArrowNotchPx = px(2);
+/** Covers the arrow at any rotation (tip 6, back corners sqrt(4² + 4.5²) ≈ 6.0). */
+constexpr int kBeyondRingMarkerRadiusPx = px(6.5f);
 constexpr int kBeyondRingScreenMarginPx = px(2);
 /** Text line height (fontHeight, px) for aircraft tags (slightly above scale label). */
 constexpr int kAircraftTagLabelHeightPx = px(13);

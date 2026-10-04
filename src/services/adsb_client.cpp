@@ -146,21 +146,13 @@ float pickNoseHeading(const JsonObject& plane) {
   return 0.0f;
 }
 
-float pickTrackHeading(const JsonObject& plane) {
-  float v = 0.0f;
-  if (readJsonFloat(plane, "track", &v)) {
-    return v;
-  }
-  if (readJsonFloat(plane, "true_heading", &v)) {
-    return v;
-  }
-  if (readJsonFloat(plane, "mag_heading", &v)) {
-    return v;
-  }
-  if (readJsonFloat(plane, "dir", &v)) {
-    return v;
-  }
-  return 0.0f;
+/** False (and *out = 0) if the message carries no track or heading at all. */
+bool pickTrackHeading(const JsonObject& plane, float* out) {
+  *out = 0.0f;
+  return readJsonFloat(plane, "track", out) ||
+         readJsonFloat(plane, "true_heading", out) ||
+         readJsonFloat(plane, "mag_heading", out) ||
+         readJsonFloat(plane, "dir", out);
 }
 
 float pickGroundSpeed(const JsonObject& plane) {
@@ -334,7 +326,7 @@ bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km) {
     s_aircraft[n].lat = plane["lat"].as<float>();
     s_aircraft[n].lon = plane["lon"].as<float>();
     s_aircraft[n].nose_deg = pickNoseHeading(plane);
-    s_aircraft[n].track_deg = pickTrackHeading(plane);
+    s_aircraft[n].has_track = pickTrackHeading(plane, &s_aircraft[n].track_deg);
     s_aircraft[n].gs_knots = pickGroundSpeed(plane);
     fillTagFields(&s_aircraft[n], plane);
     ++n;

@@ -9,8 +9,9 @@ struct Aircraft {
   float lat;
   float lon;
   float nose_deg;
-  float track_deg;
+  float track_deg;  // 0 when has_track is false
   float gs_knots;
+  bool has_track;   // false if the message had no track or heading
   char callsign[9];
   char type[5];
   char alt[12];
