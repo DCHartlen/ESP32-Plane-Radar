@@ -17,6 +17,7 @@
 #include "config.h"
 #include "data/tz_posix.h"
 #include "services/radar_location.h"
+#include "services/tls_lock.h"
 
 namespace services::clock {
 
@@ -295,9 +296,15 @@ void loop() {
   if (s_lookup_tried && millis() - s_last_lookup_ms < config::kClockZoneRetryMs) {
     return;
   }
+  // The ADS-B fetch task may hold the TLS session; try again on a later loop.
+  if (!tls::tryLock()) {
+    return;
+  }
   s_lookup_tried = true;
   s_last_lookup_ms = millis();
-  if (!lookupZone(lat, lon)) {
+  const bool found = lookupZone(lat, lon);
+  tls::unlock();
+  if (!found) {
     s_auto_resolved = false;
     estimateFromLongitude(lon);
     Serial.printf("Clock: zone lookup failed, using %s until it works\n", s_auto_tz);

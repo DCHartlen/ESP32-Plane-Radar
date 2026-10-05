@@ -65,26 +65,54 @@ enum class FetchStatus : uint8_t {
   BadResponse,     // empty body, invalid JSON, or a "msg" other than "No error"
 };
 
+/** The published fetch results, copied out once per frame by aircraftSnapshot(). */
+struct Snapshot {
+  size_t count = 0;
+  FetchStatus status = FetchStatus::Pending;
+  /** HTTP status, or the negative HTTPClient error code, of the last failed fetch. */
+  int error_code = 0;
+  /** Extra text for BadResponse (parse error or the API's "msg"); empty otherwise. */
+  char error_detail[32] = "";
+  /** The last good fetch is recent enough to draw (config::kAdsbStaleAfterMs). */
+  bool fresh = false;
+  /** millis() of the last good fetch; 0 = none since boot or invalidate(). */
+  unsigned long fetched_ms = 0;
+};
+
+/**
+ * Starts the background fetch task (core 0, stack in PSRAM). It fetches every
+ * config::kAdsbFetchIntervalMs while enabled and a request is set. Call once from setup().
+ */
+bool startFetchTask();
+
+/** Where to fetch. A change (e.g. a range change) fetches right away. Cheap to call often. */
+void setRequest(double center_lat, double center_lon, float fetch_radius_km);
+
+/** Fetch only while enabled (Wi-Fi up). Turning it on fetches right away. */
+void setEnabled(bool enabled);
+
+/** Goes up each time a fetch publishes a result, good or failed: time to redraw. */
+uint32_t publishCount();
+
+/** Copies up to max_count aircraft and the fetch status; returns the aircraft count. */
+size_t aircraftSnapshot(Aircraft* out, size_t max_count, Snapshot* meta);
+
 size_t aircraftCount();
-const Aircraft* aircraftList();
 
-FetchStatus lastStatus();
-/** HTTP status, or the negative HTTPClient error code, of the last failed fetch. */
-int lastErrorCode();
-/** Extra text for BadResponse (parse error or the API's "msg"); empty otherwise. */
-const char* lastErrorDetail();
-
-/** True if the last successful fetch is recent enough to draw (config::kAdsbStaleAfterMs). */
-bool aircraftFresh();
-
-/** Drop the aircraft list and go back to Pending, e.g. after Wi-Fi drops. */
+/**
+ * Drop the aircraft list and go back to Pending, e.g. after Wi-Fi drops. A fetch already in
+ * flight is discarded when it finishes, so it can't bring old aircraft back.
+ */
 void invalidate();
 
-/** Hook invoked during long HTTP I/O (e.g. wifiLoop). Optional. */
+/**
+ * Hook invoked during long HTTP I/O. Only for fetchUpdate() callers without the task (the
+ * panel test): the task would call it from core 0, and wifiLoop() isn't thread-safe.
+ */
 using PollFn = void (*)();
 void setPollFn(PollFn fn);
 
-/** Fetch aircraft within fetch_radius_km of center_lat/lon from adsb.fi. */
+/** Blocking fetch and publish, for the panel test. Don't use with the fetch task running. */
 bool fetchUpdate(double center_lat, double center_lon, float fetch_radius_km);
 
 }  // namespace services::adsb

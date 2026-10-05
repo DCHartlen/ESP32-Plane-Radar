@@ -404,6 +404,22 @@ struct TagStats {
 };
 TagStats s_tag_stats{};
 
+/** This frame's copy of the fetch task's results (the list is in PSRAM, ~5 KB). */
+services::adsb::Aircraft* s_planes = nullptr;
+services::adsb::Snapshot s_snapshot{};
+
+void takeSnapshot() {
+  if (s_planes == nullptr) {
+    s_planes = static_cast<services::adsb::Aircraft*>(heap_caps_malloc(
+        sizeof(services::adsb::Aircraft) * services::adsb::kMaxAircraft, MALLOC_CAP_SPIRAM));
+  }
+  if (s_planes == nullptr) {
+    s_snapshot = services::adsb::Snapshot{};  // nothing to draw, shows "Waiting for data"
+    return;
+  }
+  services::adsb::aircraftSnapshot(s_planes, services::adsb::kMaxAircraft, &s_snapshot);
+}
+
 struct AircraftDrawItem {
   size_t index = 0;
   int x = 0;
@@ -447,9 +463,8 @@ void sortBeyondRingFarFirst(BeyondRingDrawItem* items, size_t count) {
 }
 
 void drawAircraft() {
-
-  const size_t n = services::adsb::aircraftCount();
-  const services::adsb::Aircraft* planes = services::adsb::aircraftList();
+  const size_t n = s_snapshot.count;
+  const services::adsb::Aircraft* planes = s_planes;
 
   AircraftDrawItem items[services::adsb::kMaxAircraft];
   BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
@@ -731,10 +746,10 @@ void addFixedTagObstacles(const tags::ScreenRect* clock_box) {
 /** Headline and detail for the empty radar, from how the last fetch went. */
 void describeFetchProblem(char* headline, size_t headline_len, char* detail, size_t detail_len) {
   using services::adsb::FetchStatus;
-  const int code = services::adsb::lastErrorCode();
+  const int code = s_snapshot.error_code;
   const char* title = "";
   detail[0] = '\0';
-  switch (services::adsb::lastStatus()) {
+  switch (s_snapshot.status) {
     case FetchStatus::Pending:
       title = "Waiting for data";
       break;
@@ -769,7 +784,7 @@ void describeFetchProblem(char* headline, size_t headline_len, char* detail, siz
       break;
     case FetchStatus::BadResponse:
       title = "Bad data from adsb.fi";
-      snprintf(detail, detail_len, "%s", services::adsb::lastErrorDetail());
+      snprintf(detail, detail_len, "%s", s_snapshot.error_detail);
       break;
   }
   snprintf(headline, headline_len, "%s", title);
@@ -1140,8 +1155,9 @@ void radarDisplayDraw() {
     PhaseScope timer(Phase::ClockLayout);
     clock_shown = layoutClock(&clock);
   }
+  takeSnapshot();
   // Old positions look live, so once the data goes stale show why instead.
-  const bool fresh = services::adsb::aircraftFresh();
+  const bool fresh = s_snapshot.fresh;
   if (fresh) {
     {
       PhaseScope timer(Phase::Obstacles);
@@ -1162,15 +1178,13 @@ void radarDisplayDraw() {
   if (fresh) {
     Serial.printf("Radar frame: draw %lu ms, present %lu ms, %u aircraft, tags %u full, "
                   "%u short, %u hidden\n",
-                  t1 - t0, millis() - t1,
-                  static_cast<unsigned>(services::adsb::aircraftCount()),
+                  t1 - t0, millis() - t1, static_cast<unsigned>(s_snapshot.count),
                   static_cast<unsigned>(s_tag_stats.full),
                   static_cast<unsigned>(s_tag_stats.short_only),
                   static_cast<unsigned>(s_tag_stats.hidden));
   } else {
     Serial.printf("Radar frame: draw %lu ms, present %lu ms, %u aircraft (stale, hidden)\n",
-                  t1 - t0, millis() - t1,
-                  static_cast<unsigned>(services::adsb::aircraftCount()));
+                  t1 - t0, millis() - t1, static_cast<unsigned>(s_snapshot.count));
   }
   logPhases();
 }
