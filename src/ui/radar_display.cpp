@@ -1,9 +1,13 @@
 #include "ui/radar_display.h"
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <iterator>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -39,6 +43,66 @@ using radar::clipPointToOuterRing;
 using radar::distSqFromCenter;
 using radar::latLonToScreen;
 using radar::offsetKmFromCenter;
+
+/** Parts of a frame, timed separately for the serial log (phase D1 profiling). */
+enum class Phase : uint8_t {
+  Clear,
+  Rings,
+  Crosshairs,
+  Runways,
+  Home,
+  Cardinals,
+  Scale,
+  ClockLayout,
+  Obstacles,
+  Classify,
+  Rim,
+  Vectors,
+  Icons,
+  TagPlace,
+  TagDraw,
+  Problem,
+  Clock,
+  Count,
+};
+
+constexpr const char* kPhaseNames[] = {
+    "clear",    "rings", "cross",   "runways", "home",      "cardinal",
+    "scale",    "clk_layout", "obst", "classify", "rim",    "vectors",
+    "icons",    "tag_place",  "tag_draw", "problem", "clock",
+};
+static_assert(sizeof(kPhaseNames) / sizeof(kPhaseNames[0]) ==
+                  static_cast<size_t>(Phase::Count),
+              "one name per phase");
+
+uint32_t s_phase_us[static_cast<size_t>(Phase::Count)] = {};
+
+/** Adds the time until the end of its scope to one phase; a phase can be timed in pieces. */
+class PhaseScope {
+ public:
+  explicit PhaseScope(Phase phase) : phase_(phase), start_(esp_timer_get_time()) {}
+  ~PhaseScope() {
+    s_phase_us[static_cast<size_t>(phase_)] +=
+        static_cast<uint32_t>(esp_timer_get_time() - start_);
+  }
+
+ private:
+  Phase phase_;
+  int64_t start_;
+};
+
+void logPhases() {
+  char line[320];
+  int len = snprintf(line, sizeof(line), "Radar phases (ms):");
+  for (size_t i = 0; i < static_cast<size_t>(Phase::Count); ++i) {
+    if (s_phase_us[i] == 0 || len >= static_cast<int>(sizeof(line))) {
+      continue;
+    }
+    len += snprintf(line + len, sizeof(line) - len, " %s %.1f", kPhaseNames[i],
+                    s_phase_us[i] / 1000.0f);
+  }
+  Serial.println(line);
+}
 
 /** Scale label is a little shorter than the cardinal letters. */
 constexpr int kScaleLabelHeightPx =
@@ -316,6 +380,8 @@ void drawAircraft() {
   size_t draw_count = 0;
   size_t rim_count = 0;
 
+  {
+  PhaseScope timer(Phase::Classify);
   for (size_t i = 0; i < n; ++i) {
     float dx_km = 0.0f;
     float dy_km = 0.0f;
@@ -350,17 +416,22 @@ void drawAircraft() {
     rim[rim_count].color = aircraftColors(planes[i]).icon;
     ++rim_count;
   }
-
   sortBeyondRingFarFirst(rim, rim_count);
+  // Icons far-first, so near aircraft paint on top.
+  sortDrawItemsFarFirst(items, draw_count);
+  }
+
+  {
+  PhaseScope timer(Phase::Rim);
   for (size_t d = 0; d < rim_count; ++d) {
     drawBeyondRingMarker(rim[d].x, rim[d].y, rim[d].track_deg, rim[d].show_arrow,
                          rim[d].color);
     tags::addCircle(rim[d].x, rim[d].y, radar::kBeyondRingMarkerRadiusPx);
   }
+  }
 
-  // Icons far-first, so near aircraft paint on top. Each icon and speed vector is an
-  // obstacle for the tags; the draw index is the icon's owner id.
-  sortDrawItemsFarFirst(items, draw_count);
+  // Each icon and speed vector is an obstacle for the tags; the draw index is the icon's
+  // owner id.
   for (size_t d = 0; d < draw_count; ++d) {
     const size_t i = items[d].index;
     const int x = items[d].x;
@@ -370,10 +441,12 @@ void drawAircraft() {
     // Drawn before the icon, so the part under it is hidden.
     if (planes[i].has_track &&
         speedVectorEnd(x, y, planes[i].track_deg, planes[i].gs_knots, &ex, &ey)) {
+      PhaseScope timer(Phase::Vectors);
       canvas.drawWideLine(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth,
                           items[d].colors.track);
       tags::addSegment(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth);
     }
+    PhaseScope timer(Phase::Icons);
     radar::drawAircraftIcon(x, y, iconBearing(planes[i]), items[d].shape,
                             items[d].colors.icon);
     tags::addCircle(x, y, radar::iconRadiusPx(items[d].shape), static_cast<int>(d));
@@ -381,6 +454,7 @@ void drawAircraft() {
 
   // Tags nearest-first, so the aircraft that matter most get the best slots. The nearest
   // max_full_tags get every line; the rest, or any that don't fit, try the first line alone.
+  const int64_t tag_place_start = esp_timer_get_time();
   applyTagStyle();
   const int line_h = canvas.fontHeight();
   const uint8_t max_full = radar::rangeCurrent().max_full_tags;
@@ -423,8 +497,13 @@ void drawAircraft() {
     } else {
       ++s_tag_stats.short_only;
     }
+    PhaseScope timer(Phase::TagDraw);
     drawTag(text, lines, box, slot, line_h);
   }
+  // Text measuring and slot search: everything in the tag pass except drawing.
+  const uint32_t tag_us = static_cast<uint32_t>(esp_timer_get_time() - tag_place_start);
+  s_phase_us[static_cast<size_t>(Phase::TagPlace)] +=
+      tag_us - std::min(tag_us, s_phase_us[static_cast<size_t>(Phase::TagDraw)]);
 }
 
 void applyCardinalStyle() {
@@ -497,11 +576,33 @@ void drawRings(int cx, int cy, int outer_radius) {
   }
 }
 
-void drawCrosshairs(int cx, int cy, int radius, uint16_t color) {
-  canvas.drawWideLine(cx, cy - radius, cx, cy + radius,
-                      radar::kGridStrokeHalfWidth, color);
-  canvas.drawWideLine(cx - radius, cy, cx + radius, cy,
-                      radar::kGridStrokeHalfWidth, color);
+/**
+ * Axis-aligned, so a solid odd-width core plus one partly covered line of pixels each side
+ * looks like drawWideLine's anti-aliasing without blending every pixel (~25 ms → <1 ms).
+ */
+void drawCrosshairs(int cx, int cy, int radius) {
+  const float width = radar::kGridStrokeHalfWidth * 2.0f;
+  int core = std::max(1, static_cast<int>(width));
+  if (core % 2 == 0) {
+    --core;
+  }
+  const int half = core / 2;
+  const int len = radius * 2 + 1;
+  const float edge_coverage = (width - static_cast<float>(core)) * 0.5f;
+
+  // Edges first, so the other line's core covers them where the two cross.
+  if (edge_coverage > 0.05f) {
+    const Rgb edge = mixRgb({radar::kBgR, radar::kBgG, radar::kBgB},
+                            {radar::kGridR, radar::kGridG, radar::kGridB},
+                            std::min(edge_coverage, 1.0f));
+    const uint16_t edge_color = canvas.color565(edge.r, edge.g, edge.b);
+    canvas.fillRect(cx - half - 1, cy - radius, 1, len, edge_color);
+    canvas.fillRect(cx + half + 1, cy - radius, 1, len, edge_color);
+    canvas.fillRect(cx - radius, cy - half - 1, len, 1, edge_color);
+    canvas.fillRect(cx - radius, cy + half + 1, len, 1, edge_color);
+  }
+  canvas.fillRect(cx - half, cy - radius, core, len, radar::kColorGrid);
+  canvas.fillRect(cx - radius, cy - half, len, core, radar::kColorGrid);
 }
 
 void drawHomeMarker(int cx, int cy) {
@@ -638,21 +739,20 @@ void drawFetchProblem() {
 }
 
 /**
- * White text over a black outline, on a transparent background. The outline is the text
- * drawn at 12 points around a circle; 8 left notches at the corners once it got thicker.
+ * The clock's outline: the text drawn at 12 points around a circle, on a transparent
+ * background (8 left notches at the corners once it got thicker).
  */
-void drawOutlinedString(const char* text, int x, int y) {
+void drawStringOutline(lgfx::LGFXBase& gfx, const char* text, int x, int y,
+                       uint16_t color) {
   constexpr int kSteps = 12;
   constexpr float kStepRad = 6.2831853f / kSteps;
   constexpr float o = radar::kClockOutlinePx;
-  canvas.setTextColor(config::kColorBlack);
+  gfx.setTextColor(color);
   for (int i = 0; i < kSteps; ++i) {
     const int dx = static_cast<int>(lroundf(cosf(i * kStepRad) * o));
     const int dy = static_cast<int>(lroundf(sinf(i * kStepRad) * o));
-    canvas.drawString(text, x + dx, y + dy);
+    gfx.drawString(text, x + dx, y + dy);
   }
-  canvas.setTextColor(radar::kColorLabel);
-  canvas.drawString(text, x, y);
 }
 
 struct ClockLayout {
@@ -694,15 +794,230 @@ bool layoutClock(ClockLayout* clock) {
   return true;
 }
 
+enum class ClockPass : uint8_t { Outline, Text };
+
+/** One pass of the clock (time and suffix) into gfx, whose top-left is screen (ox, oy). */
+void drawClockPass(lgfx::LGFXBase& gfx, const ClockLayout& clock, int ox, int oy,
+                   ClockPass pass, uint16_t color) {
+  gfx.setTextDatum(textdatum_t::baseline_left);
+  const int y = clock.baseline_y - oy;
+  const auto part = [&](const char* text, int x, int height_px) {
+    displayFontApply(gfx, height_px);
+    if (pass == ClockPass::Outline) {
+      drawStringOutline(gfx, text, x, y, color);
+    } else {
+      gfx.setTextColor(color);
+      gfx.drawString(text, x, y);
+    }
+  };
+  part(clock.hhmm, clock.left_x - ox, radar::kClockLabelHeightPx);
+  if (clock.suffix_w > 0) {
+    part(clock.suffix, clock.left_x + clock.time_w + clock.gap - ox,
+         radar::kAircraftTagLabelHeightPx);
+  }
+}
+
+/**
+ * The clock, rendered once per minute: two bytes per pixel, its alpha and how much of the
+ * white text shows (black outline over the background, then white text). Blending this
+ * costs a few ms, where drawing the 13 transparent anti-aliased strings cost ~60.
+ */
+struct ClockImage {
+  char hhmm[8];
+  char suffix[4];
+  int x;
+  int y;
+  int w;
+  int h;
+  uint8_t* px;  // PSRAM, w * h * 2
+};
+ClockImage s_clock_image{};
+LGFX_Sprite s_clock_sprite;
+
+/**
+ * A pixel's green level in the scratch sprite, 0–255: the coverage of what was drawn white
+ * on black. The sprite stores RGB565 byte-swapped: RRRRRGGG GGGBBBBB.
+ */
+uint8_t clockCoverage(int x, int y) {
+  const uint8_t* p =
+      static_cast<const uint8_t*>(s_clock_sprite.getBuffer()) +
+      (static_cast<size_t>(y) * s_clock_sprite.width() + x) * 2;
+  const uint32_t g6 = ((p[0] & 0x07u) << 3) | (p[1] >> 5);
+  return static_cast<uint8_t>((g6 << 2) | (g6 >> 4));
+}
+
+/** Renders the clock into s_clock_image if the text changed; false if out of memory. */
+bool updateClockImage(const ClockLayout& clock) {
+  ClockImage& img = s_clock_image;
+  if (img.px != nullptr && strcmp(img.hhmm, clock.hhmm) == 0 &&
+      strcmp(img.suffix, clock.suffix) == 0) {
+    return true;
+  }
+  heap_caps_free(img.px);
+  img = {};
+
+  // Generous box: the outline, and glyphs that reach past their measured width or the
+  // line height. Trimmed to the drawn pixels below.
+  const int pad = radar::kClockOutlinePx + px(2);
+  const int ox = clock.left_x - pad;
+  const int oy = clock.baseline_y - radar::kClockLabelHeightPx - pad;
+  const int w = clock.time_w + clock.gap + clock.suffix_w + pad * 2;
+  const int h = radar::kClockLabelHeightPx * 3 / 2 + pad * 2;
+
+  s_clock_sprite.setPsram(true);
+  s_clock_sprite.setColorDepth(16);
+  if (s_clock_sprite.createSprite(w, h) == nullptr) {
+    return false;
+  }
+  s_clock_sprite.setTextWrap(false);
+  uint8_t* full = static_cast<uint8_t*>(
+      heap_caps_malloc(static_cast<size_t>(w) * h * 2, MALLOC_CAP_SPIRAM));
+  if (full == nullptr) {
+    s_clock_sprite.deleteSprite();
+    return false;
+  }
+
+  // Coverage of the outline and of the text, each drawn white on black.
+  s_clock_sprite.fillSprite(TFT_BLACK);
+  drawClockPass(s_clock_sprite, clock, ox, oy, ClockPass::Outline, TFT_WHITE);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      full[(y * w + x) * 2] = clockCoverage(x, y);
+    }
+  }
+  s_clock_sprite.fillSprite(TFT_BLACK);
+  drawClockPass(s_clock_sprite, clock, ox, oy, ClockPass::Text, TFT_WHITE);
+
+  // On screen the result is bg * (1 - outline) * (1 - text) + white * text, so the alpha
+  // is 1 - (1 - outline) * (1 - text).
+  int min_x = w;
+  int min_y = h;
+  int max_x = -1;
+  int max_y = -1;
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      uint8_t* p = &full[(y * w + x) * 2];
+      const uint32_t text = clockCoverage(x, y);
+      const uint32_t outline = p[0];
+      p[0] = static_cast<uint8_t>(255 - ((255 - outline) * (255 - text) + 127) / 255);
+      p[1] = static_cast<uint8_t>(text);
+      if (p[0] != 0) {
+        min_x = std::min(min_x, x);
+        max_x = std::max(max_x, x);
+        min_y = std::min(min_y, y);
+        max_y = std::max(max_y, y);
+      }
+    }
+  }
+  s_clock_sprite.deleteSprite();
+
+  if (max_x < 0) {  // nothing drawn; keep an empty image so this isn't redone every frame
+    max_x = min_x = 0;
+    max_y = min_y = 0;
+    full[0] = 0;
+  }
+  img.w = max_x - min_x + 1;
+  img.h = max_y - min_y + 1;
+  img.x = ox + min_x;
+  img.y = oy + min_y;
+  img.px = static_cast<uint8_t*>(
+      heap_caps_malloc(static_cast<size_t>(img.w) * img.h * 2, MALLOC_CAP_SPIRAM));
+  if (img.px == nullptr) {
+    heap_caps_free(full);
+    img = {};
+    return false;
+  }
+  for (int y = 0; y < img.h; ++y) {
+    memcpy(&img.px[y * img.w * 2], &full[((min_y + y) * w + min_x) * 2],
+           static_cast<size_t>(img.w) * 2);
+  }
+  heap_caps_free(full);
+  snprintf(img.hhmm, sizeof(img.hhmm), "%s", clock.hhmm);
+  snprintf(img.suffix, sizeof(img.suffix), "%s", clock.suffix);
+  return true;
+}
+
+/** Blends s_clock_image straight into the canvas buffer (RGB565, native byte order). */
+void blendClockImage() {
+  const ClockImage& img = s_clock_image;
+  uint16_t* fb = static_cast<uint16_t*>(canvas.getBuffer());
+  if (fb == nullptr || img.px == nullptr) {
+    return;
+  }
+  constexpr int kW = config::kDisplayWidth;
+  constexpr int kH = config::kDisplayHeight;
+  for (int y = 0; y < img.h; ++y) {
+    const int sy = img.y + y;
+    if (sy < 0 || sy >= kH) {
+      continue;
+    }
+    const uint8_t* src = &img.px[y * img.w * 2];
+    for (int x = 0; x < img.w; ++x, src += 2) {
+      const uint32_t alpha = src[0];
+      const int sx = img.x + x;
+      if (alpha == 0 || sx < 0 || sx >= kW) {
+        continue;
+      }
+      // canvas rotation 2 turns the buffer by 180 degrees.
+      const size_t index = config::kDisplayRotate180
+                               ? static_cast<size_t>(kH - 1 - sy) * kW + (kW - 1 - sx)
+                               : static_cast<size_t>(sy) * kW + sx;
+      const uint32_t text = src[1];
+      const uint32_t keep = 255 - alpha;
+      const uint32_t dst = fb[index];
+      const uint32_t r = ((dst >> 11) * keep + 31 * text + 127) / 255;
+      const uint32_t g = (((dst >> 5) & 0x3F) * keep + 63 * text + 127) / 255;
+      const uint32_t b = ((dst & 0x1F) * keep + 31 * text + 127) / 255;
+      fb[index] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+    }
+  }
+}
+
 /** Local time on the south spoke, drawn last so it sits above aircraft and tags. */
 void drawClock(const ClockLayout& clock) {
-  canvas.setTextDatum(textdatum_t::baseline_left);
-  displayFontApply(canvas, radar::kClockLabelHeightPx);
-  drawOutlinedString(clock.hhmm, clock.left_x, clock.baseline_y);
-  if (clock.suffix_w > 0) {
-    displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
-    drawOutlinedString(clock.suffix, clock.left_x + clock.time_w + clock.gap,
-                       clock.baseline_y);
+  if (updateClockImage(clock)) {
+    blendClockImage();
+    return;
+  }
+  // Out of PSRAM: draw it straight onto the canvas, the slow way.
+  drawClockPass(canvas, clock, 0, 0, ClockPass::Outline, config::kColorBlack);
+  drawClockPass(canvas, clock, 0, 0, ClockPass::Text, radar::kColorLabel);
+}
+
+/** One row of the clear colour, in internal RAM so clearing never reads PSRAM back. */
+alignas(4) uint16_t s_clear_row[config::kDisplayWidth];
+
+/**
+ * fillScreen for a colour whose two bytes differ fills a short run, then memcpys PSRAM to
+ * PSRAM, reading back as much as it writes (~100 ms). This copies an internal row instead,
+ * and only the part of each row inside the round glass: the corners (~21% of the buffer)
+ * are never seen, so whatever was drawn there can stay.
+ */
+void clearCanvas(uint16_t color) {
+  uint8_t* fb = static_cast<uint8_t*>(canvas.getBuffer());
+  if (fb == nullptr) {
+    canvas.fillScreen(color);
+    return;
+  }
+  if (s_clear_row[0] != color || s_clear_row[config::kDisplayWidth - 1] != color) {
+    std::fill(std::begin(s_clear_row), std::end(s_clear_row), color);
+  }
+  // The canvas is rgb565_nonswapped, so color565() values go in as they are.
+  constexpr size_t kRowBytes = sizeof(s_clear_row);
+  constexpr int kW = config::kDisplayWidth;
+  constexpr float kRadius = kW * 0.5f;
+  // Spans start and end on 16 px (one 32-byte cache line), which also leaves a few px of
+  // margin outside the glass.
+  constexpr int kAlignPx = 16;
+  static_assert(kW % kAlignPx == 0, "rows must split into whole cache lines");
+  for (int y = 0; y < config::kDisplayHeight; ++y) {
+    const float dy = static_cast<float>(y) + 0.5f - config::kDisplayHeight * 0.5f;
+    const float half_sq = kRadius * kRadius - dy * dy;
+    const int half = half_sq > 0.0f ? static_cast<int>(ceilf(sqrtf(half_sq))) : 0;
+    const int left = std::max(0, (kW / 2 - half) / kAlignPx * kAlignPx);
+    const int right = kW - left;  // symmetric about the centre
+    memcpy(fb + static_cast<size_t>(y) * kRowBytes + left * sizeof(uint16_t), s_clear_row,
+           static_cast<size_t>(right - left) * sizeof(uint16_t));
   }
 }
 
@@ -711,12 +1026,31 @@ void drawStaticGrid() {
   const int cy = radar::kCenterY;
   const int grid_r = radar::kGridOuterRadius;
 
-  canvas.fillScreen(radar::kColorBackground);
-  drawRings(cx, cy, grid_r);
-  drawCrosshairs(cx, cy, grid_r, radar::kColorGrid);
-  runway::drawLargeAirportRunways(canvas);
-  drawHomeMarker(cx, cy);
-  drawCardinalLabels();
+  {
+    PhaseScope timer(Phase::Clear);
+    clearCanvas(radar::kColorBackground);
+  }
+  {
+    PhaseScope timer(Phase::Rings);
+    drawRings(cx, cy, grid_r);
+  }
+  {
+    PhaseScope timer(Phase::Crosshairs);
+    drawCrosshairs(cx, cy, grid_r);
+  }
+  {
+    PhaseScope timer(Phase::Runways);
+    runway::drawLargeAirportRunways(canvas);
+  }
+  {
+    PhaseScope timer(Phase::Home);
+    drawHomeMarker(cx, cy);
+  }
+  {
+    PhaseScope timer(Phase::Cardinals);
+    drawCardinalLabels();
+  }
+  PhaseScope timer(Phase::Scale);
   drawScaleLabel(cx, cy, grid_r);
 }
 
@@ -726,20 +1060,30 @@ void drawStaticGrid() {
 // so labels never show an erase/redraw gap.
 void radarDisplayDraw() {
   const unsigned long t0 = millis();
+  std::fill(std::begin(s_phase_us), std::end(s_phase_us), 0);
   initPalette();
   tags::beginFrame();
   drawStaticGrid();
   ClockLayout clock{};
-  const bool clock_shown = layoutClock(&clock);
+  bool clock_shown = false;
+  {
+    PhaseScope timer(Phase::ClockLayout);
+    clock_shown = layoutClock(&clock);
+  }
   // Old positions look live, so once the data goes stale show why instead.
   const bool fresh = services::adsb::aircraftFresh();
   if (fresh) {
-    addFixedTagObstacles(clock_shown ? &clock.box : nullptr);
+    {
+      PhaseScope timer(Phase::Obstacles);
+      addFixedTagObstacles(clock_shown ? &clock.box : nullptr);
+    }
     drawAircraft();
   } else {
+    PhaseScope timer(Phase::Problem);
     drawFetchProblem();
   }
   if (clock_shown) {
+    PhaseScope timer(Phase::Clock);
     drawClock(clock);
   }
   canvas.setTextDatum(textdatum_t::top_left);
@@ -758,6 +1102,7 @@ void radarDisplayDraw() {
                   t1 - t0, millis() - t1,
                   static_cast<unsigned>(services::adsb::aircraftCount()));
   }
+  logPhases();
 }
 
 void radarDisplayRefreshAircraft() { radarDisplayDraw(); }
