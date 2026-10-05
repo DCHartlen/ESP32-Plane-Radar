@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Build the embedded anti-aliased UI fonts (Processing/TFT_eSPI VLW format).
 
-Renders fonts/NotoSans-Bold.ttf with FreeType into data/ui_font_small.vlw and
-data/ui_font_large.vlw. The firmware only ever scales these down (0.5x-1.0x),
-so each text height is drawn from the smallest file at least that tall.
+Renders fonts/NotoSans-Bold.ttf with FreeType into data/ui_font_*.vlw. The
+firmware draws each text height from the smallest file at least that tall,
+scaled down (0.5x-1.0x). A file whose line height is the text height or 1 px
+less is drawn unscaled, which is sharper (scaling down drops glyph pixels): the
+aircraft tags have one.
 
 Requires: pip install freetype-py
 """
@@ -18,10 +20,14 @@ import freetype
 ROOT = Path(__file__).resolve().parents[1]
 FONT_PATH = ROOT / "fonts" / "NotoSans-Bold.ttf"
 
-# (output file, FreeType pixel size)
+# (output file, FreeType pixel size or None, line height to fit when the size is None)
+# The tag file fits kAircraftTagLabelHeightPx (radar_theme.h, px(13) = 26 at
+# kUiDensity 0.67) so tags are drawn at text size 1.
+TAG_LINE_HEIGHT = 26
 OUTPUTS = [
-    (ROOT / "data" / "ui_font_small.vlw", 32),
-    (ROOT / "data" / "ui_font_large.vlw", 64),
+    (ROOT / "data" / "ui_font_tag.vlw", None, TAG_LINE_HEIGHT),
+    (ROOT / "data" / "ui_font_small.vlw", 32, None),
+    (ROOT / "data" / "ui_font_large.vlw", 64, None),
 ]
 
 # Printable ASCII, plus the ellipsis (SSID truncation) and the degree sign.
@@ -49,16 +55,43 @@ def render_glyph(face: freetype.Face, cp: int) -> tuple[list[int], bytes]:
     return metrics, bytes(rows)
 
 
-def build(out_path: Path, pixel_size: int) -> None:
+def render(pixel_size: int) -> tuple[list[tuple[list[int], bytes]], int, int, int]:
+    """Glyphs, header ascent and descent, and LovyanGFX's line height at size 1."""
     face = freetype.Face(str(FONT_PATH))
     face.set_pixel_sizes(0, pixel_size)
-
     glyphs = [render_glyph(face, cp) for cp in CODEPOINTS]
     by_cp = {m[0]: m for m, _ in glyphs}
 
     # Same convention as Processing: ascent of "d", descent of "p".
     ascent = by_cp[ord("d")][4]
     descent = by_cp[ord("p")][1] - by_cp[ord("p")][4]
+
+    # LovyanGFX line height (fontHeight at size 1): tallest ascent plus deepest
+    # descent over all glyphs, starting from the header values.
+    max_ascent = max([ascent] + [m[4] for m, _ in glyphs])
+    max_descent = max([descent] + [m[1] - m[4] for m, _ in glyphs])
+    return glyphs, ascent, descent, max_ascent + max_descent
+
+
+def fit_pixel_size(line_height: int) -> int:
+    """The largest FreeType pixel size whose line height is at most line_height.
+
+    Noto Sans Bold's line height goes up in steps of 2, so this can be 1 px short;
+    displayFontApply draws a file unscaled when it's within 1 px under the request.
+    """
+    best = None
+    for size in range(4, 200):
+        if render(size)[3] > line_height:
+            break
+        best = size
+    if best is None or render(best)[3] < line_height - 1:
+        raise SystemExit(f"no pixel size gives a line height of {line_height} or 1 less")
+    return best
+
+
+def build(out_path: Path, pixel_size: int) -> None:
+    glyphs, ascent, descent, line_height = render(pixel_size)
+    by_cp = {m[0]: m for m, _ in glyphs}
 
     out = bytearray()
     out += struct.pack(">6i", len(glyphs), VLW_VERSION, pixel_size, 0, ascent, descent)
@@ -70,21 +103,17 @@ def build(out_path: Path, pixel_size: int) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(out)
 
-    # LovyanGFX line height (fontHeight at size 1): tallest ascent plus deepest
-    # descent over all glyphs, starting from the header values.
-    max_ascent = max([ascent] + [m[4] for m, _ in glyphs])
-    max_descent = max([descent] + [m[1] - m[4] for m, _ in glyphs])
     cap_height = by_cp[ord("H")][4]
     print(
         f"{out_path.relative_to(ROOT)}: {len(glyphs)} glyphs, {len(out)} bytes, "
         f"pixel size {pixel_size}, cap height {cap_height}, "
-        f"line height {max_ascent + max_descent}"
+        f"line height {line_height}"
     )
 
 
 def main() -> None:
-    for out_path, pixel_size in OUTPUTS:
-        build(out_path, pixel_size)
+    for out_path, pixel_size, line_height in OUTPUTS:
+        build(out_path, pixel_size if pixel_size is not None else fit_pixel_size(line_height))
 
 
 if __name__ == "__main__":

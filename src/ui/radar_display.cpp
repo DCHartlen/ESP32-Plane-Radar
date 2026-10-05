@@ -104,6 +104,82 @@ void logPhases() {
   Serial.println(line);
 }
 
+// Direct framebuffer access for hot paths. LovyanGFX's per-pixel calls cost ~1 µs each;
+// these write the canvas buffer (RGB565, native byte order) themselves.
+constexpr int kFbW = config::kDisplayWidth;
+constexpr int kFbH = config::kDisplayHeight;
+
+/** Buffer index of canvas pixel (x, y), which must be on screen; rotation 2 turns it 180°. */
+inline size_t fbIndex(int x, int y) {
+  return config::kDisplayRotate180 ? static_cast<size_t>(kFbH - 1 - y) * kFbW + (kFbW - 1 - x)
+                                   : static_cast<size_t>(y) * kFbW + x;
+}
+
+/** color over dst at alpha 0–255. */
+inline uint16_t blend565(uint32_t dst, uint32_t color, uint32_t alpha) {
+  const uint32_t keep = 255 - alpha;
+  const uint32_t r = ((dst >> 11) * keep + (color >> 11) * alpha + 127) / 255;
+  const uint32_t g = (((dst >> 5) & 0x3F) * keep + ((color >> 5) & 0x3F) * alpha + 127) / 255;
+  const uint32_t b = ((dst & 0x1F) * keep + (color & 0x1F) * alpha + 127) / 255;
+  return static_cast<uint16_t>((r << 11) | (g << 5) | b);
+}
+
+/**
+ * Anti-aliased line of half-width half_w, flat-ended, written straight into the canvas.
+ * drawWideLine tests every pixel in a box around the line and reads each one it touches
+ * back through LovyanGFX (~1.4 ms for a speed vector). This walks the major axis and, at
+ * each step, fills the span across the line: covered pixels solid, the edges blended by
+ * how much of them the span covers.
+ */
+void drawThickLine(int x0, int y0, int x1, int y1, float half_w, uint16_t color) {
+  uint16_t* fb = static_cast<uint16_t*>(canvas.getBuffer());
+  if (fb == nullptr) {
+    canvas.drawWideLine(x0, y0, x1, y1, half_w, color);
+    return;
+  }
+  const bool steep = std::abs(y1 - y0) > std::abs(x1 - x0);
+  // u runs along the major axis, v across it.
+  int u0 = steep ? y0 : x0;
+  int v0 = steep ? x0 : y0;
+  int u1 = steep ? y1 : x1;
+  int v1 = steep ? x1 : y1;
+  if (u0 > u1) {
+    std::swap(u0, u1);
+    std::swap(v0, v1);
+  }
+  const int du = u1 - u0;
+  const int dv = v1 - v0;
+  if (du == 0) {  // a single point
+    return;
+  }
+  const float slope = static_cast<float>(dv) / du;
+  // Measured along v, the line is wider than half_w by 1 / cos of its angle to u.
+  const float half_span = half_w * sqrtf(static_cast<float>(du * du + dv * dv)) / du;
+
+  for (int u = u0; u <= u1; ++u) {
+    const float vc = v0 + slope * static_cast<float>(u - u0);
+    const float lo = vc - half_span;
+    const float hi = vc + half_span;
+    // Pixel v covers [v - 0.5, v + 0.5].
+    const int v_first = static_cast<int>(floorf(lo + 0.5f));
+    const int v_last = static_cast<int>(ceilf(hi - 0.5f));
+    for (int v = v_first; v <= v_last; ++v) {
+      const float cover = std::min(hi, v + 0.5f) - std::max(lo, v - 0.5f);
+      if (cover <= 0.004f) {
+        continue;
+      }
+      const int x = steep ? v : u;
+      const int y = steep ? u : v;
+      if (x < 0 || x >= kFbW || y < 0 || y >= kFbH) {
+        continue;
+      }
+      uint16_t& px = fb[fbIndex(x, y)];
+      px = cover >= 0.996f ? color
+                           : blend565(px, color, static_cast<uint32_t>(cover * 255.0f + 0.5f));
+    }
+  }
+}
+
 /** Scale label is a little shorter than the cardinal letters. */
 constexpr int kScaleLabelHeightPx =
     radar::kCardinalLabelHeightPx - radar::kScaleBelowCardinalPx;
@@ -442,8 +518,7 @@ void drawAircraft() {
     if (planes[i].has_track &&
         speedVectorEnd(x, y, planes[i].track_deg, planes[i].gs_knots, &ex, &ey)) {
       PhaseScope timer(Phase::Vectors);
-      canvas.drawWideLine(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth,
-                          items[d].colors.track);
+      drawThickLine(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth, items[d].colors.track);
       tags::addSegment(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth);
     }
     PhaseScope timer(Phase::Icons);
@@ -944,24 +1019,19 @@ void blendClockImage() {
   if (fb == nullptr || img.px == nullptr) {
     return;
   }
-  constexpr int kW = config::kDisplayWidth;
-  constexpr int kH = config::kDisplayHeight;
   for (int y = 0; y < img.h; ++y) {
     const int sy = img.y + y;
-    if (sy < 0 || sy >= kH) {
+    if (sy < 0 || sy >= kFbH) {
       continue;
     }
     const uint8_t* src = &img.px[y * img.w * 2];
     for (int x = 0; x < img.w; ++x, src += 2) {
       const uint32_t alpha = src[0];
       const int sx = img.x + x;
-      if (alpha == 0 || sx < 0 || sx >= kW) {
+      if (alpha == 0 || sx < 0 || sx >= kFbW) {
         continue;
       }
-      // canvas rotation 2 turns the buffer by 180 degrees.
-      const size_t index = config::kDisplayRotate180
-                               ? static_cast<size_t>(kH - 1 - sy) * kW + (kW - 1 - sx)
-                               : static_cast<size_t>(sy) * kW + sx;
+      const size_t index = fbIndex(sx, sy);
       const uint32_t text = src[1];
       const uint32_t keep = 255 - alpha;
       const uint32_t dst = fb[index];
