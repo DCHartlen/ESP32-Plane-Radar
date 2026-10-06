@@ -25,17 +25,18 @@ void offsetKmFromCenter(float lat, float lon, float* dx_km, float* dy_km, float*
   *dist_km = sqrtf((*dx_km) * (*dx_km) + (*dy_km) * (*dy_km));
 }
 
-void latLonToScreen(float lat, float lon, int* out_x, int* out_y) {
-  const float outer_km = rangeCurrent().outer_km;
-  const float px_per_km = static_cast<float>(kGridOuterRadius) / outer_km;
+void kmOffsetToScreen(float dx_km, float dy_km, int* out_x, int* out_y) {
+  const float px_per_km = static_cast<float>(kGridOuterRadius) / rangeCurrent().outer_km;
+  *out_x = kCenterX + static_cast<int>(lroundf(dx_km * px_per_km));
+  *out_y = kCenterY - static_cast<int>(lroundf(dy_km * px_per_km));
+}
 
+void latLonToScreen(float lat, float lon, int* out_x, int* out_y) {
   float dx_km = 0.0f;
   float dy_km = 0.0f;
   float dist_km = 0.0f;
   offsetKmFromCenter(lat, lon, &dx_km, &dy_km, &dist_km);
-
-  *out_x = kCenterX + static_cast<int>(lroundf(dx_km * px_per_km));
-  *out_y = kCenterY - static_cast<int>(lroundf(dy_km * px_per_km));
+  kmOffsetToScreen(dx_km, dy_km, out_x, out_y);
 }
 
 int distSqFromCenter(int x, int y) {

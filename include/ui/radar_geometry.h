@@ -18,6 +18,9 @@ struct ScreenRect {
 /** Offset of (lat, lon) from the radar center in km (x east, y north) and its distance. */
 void offsetKmFromCenter(float lat, float lon, float* dx_km, float* dy_km, float* dist_km);
 
+/** Screen position of an offset from the radar center in km (x east, y north); north is up. */
+void kmOffsetToScreen(float dx_km, float dy_km, int* out_x, int* out_y);
+
 /** Screen position of (lat, lon) at the current range; north is up. */
 void latLonToScreen(float lat, float lon, int* out_x, int* out_y);
 

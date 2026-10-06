@@ -25,6 +25,7 @@ unsigned long g_wifi_down_since = 0;
 unsigned long g_last_reconnect_ms = 0;
 int g_drawn_minute = -1;  // clock minute on screen, so a minute change redraws
 uint32_t g_drawn_publish = 0;  // services::adsb::publishCount() of the frame on screen
+unsigned long g_last_draw_ms = 0;  // start of the last radar frame
 
 /** Internal RAM headroom (bounce buffers and TLS both come from it). */
 void logInternalHeap(const char* when) {
@@ -34,13 +35,20 @@ void logInternalHeap(const char* when) {
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
 }
 
+/** Draws a radar frame. `log` prints its timing; animation frames in between pass false. */
+void drawRadar(bool log) {
+  // Read before drawing: a fetch that publishes mid-frame gets its own frame next pass.
+  g_drawn_publish = services::adsb::publishCount();
+  g_last_draw_ms = millis();
+  ui::radarDisplayDraw(log);
+}
+
 void showRadarIfConnected() {
   if (WiFi.status() != WL_CONNECTED) {
     g_radar_visible = false;
     return;
   }
-  g_drawn_publish = services::adsb::publishCount();
-  ui::radarDisplayDraw();
+  drawRadar(true);
   g_radar_visible = true;
 }
 
@@ -62,7 +70,7 @@ void handleButtons() {
                 ui::radar::rangeCurrent().outer_km);
 
   if (g_radar_visible && WiFi.status() == WL_CONNECTED) {
-    ui::radarDisplayDraw();
+    drawRadar(true);
   }
 }
 
@@ -149,12 +157,15 @@ void loop() {
       showRadarIfConnected();
     } else if (published != g_drawn_publish) {
       // A fetch finished. Redraw on failure too, so stale aircraft give way to the error.
-      g_drawn_publish = published;
-      ui::radarDisplayRefreshAircraft();
+      drawRadar(true);
       logInternalHeap("");
+    } else if (ui::radarDisplayAnimating() &&
+               millis() - g_last_draw_ms >= config::kRadarRedrawIntervalMs) {
+      // Dead reckoning moves the aircraft between fetches.
+      drawRadar(false);
     } else if (minute != g_drawn_minute) {
-      // Frames normally come every fetch; this keeps the clock from lagging up to 5 s.
-      ui::radarDisplayDraw();
+      // Nothing is moving, so frames only come with fetches; keep the clock from lagging.
+      drawRadar(false);
     }
     g_drawn_minute = minute;
   }

@@ -75,8 +75,13 @@ struct Snapshot {
   char error_detail[32] = "";
   /** The last good fetch is recent enough to draw (config::kAdsbStaleAfterMs). */
   bool fresh = false;
-  /** millis() of the last good fetch; 0 = none since boot or invalidate(). */
+  /** millis() when the last good fetch's body arrived; 0 = none since boot or invalidate(). */
   unsigned long fetched_ms = 0;
+  /**
+   * millis() at the server's "now" for the last good fetch: fetched_ms minus the server's
+   * lag. Each aircraft's position is seen_pos_s older than this.
+   */
+  unsigned long positions_ms = 0;
 };
 
 /**

@@ -10,7 +10,10 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <sys/time.h>
+
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "config.h"
@@ -38,6 +41,12 @@ struct Outcome {
   int error_code = 0;
   char error_detail[sizeof(Snapshot::error_detail)] = "";
   size_t count = 0;
+  unsigned long received_ms = 0;  // millis() when the body arrived
+  int64_t received_epoch_ms = 0;  // wall clock at the same moment; 0 before SNTP sync
+  double api_now_ms = 0.0;        // the response's "now" (server time); 0 if missing
+  long lag_ms = 0;                // how old the server's snapshot was on arrival
+  bool lag_measured = false;      // false: lag_ms is config::kAdsbDefaultLagMs
+  unsigned long positions_ms = 0; // millis() at the server's "now"; seen_pos is relative to it
 };
 
 struct Request {
@@ -53,6 +62,7 @@ Aircraft* s_aircraft = nullptr;  // published list, PSRAM
 Aircraft* s_staging = nullptr;   // the fetch's private list, PSRAM
 Outcome s_published;
 unsigned long s_last_ok_ms = 0;  // 0 = no good fetch since boot or invalidate()
+unsigned long s_positions_ms = 0;  // Outcome::positions_ms of the last good fetch
 uint32_t s_generation = 0;       // bumped by invalidate()
 uint32_t s_publish_count = 0;
 Request s_request;
@@ -128,6 +138,37 @@ void logHeapTrace() {
                 s_trace.start, s_trace.connected, s_trace.read_min, s_trace.body,
                 s_trace.closed, s_trace.parsed, static_cast<unsigned>(s_trace.body_bytes),
                 s_trace.parse_ms, static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+}
+
+/** Wall-clock ms since the epoch, or 0 until SNTP has set the clock. */
+int64_t epochMsIfSynced() {
+  timeval tv{};
+  gettimeofday(&tv, nullptr);
+  if (tv.tv_sec < 1600000000) {
+    return 0;
+  }
+  return static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+}
+
+/**
+ * adsb.fi rebuilds its data every ~2 s, so the response's "now" is 1-2.5 s old on arrival, by
+ * a different amount each fetch. seen_pos is relative to "now", so without this the aircraft
+ * jump back and forth along their track on alternate fetches. Measured with the SNTP clock;
+ * before sync, or if the result is implausible, uses config::kAdsbDefaultLagMs.
+ */
+void setPositionsTime(Outcome* out) {
+  constexpr double kMinPlausibleLagMs = -5000.0;  // small negatives are clock error
+  constexpr double kMaxPlausibleLagMs = 15000.0;
+  out->lag_ms = static_cast<long>(config::kAdsbDefaultLagMs);
+  out->lag_measured = false;
+  if (out->received_epoch_ms != 0 && out->api_now_ms > 0.0) {
+    const double lag = static_cast<double>(out->received_epoch_ms) - out->api_now_ms;
+    if (lag >= kMinPlausibleLagMs && lag <= kMaxPlausibleLagMs) {
+      out->lag_ms = static_cast<long>(lag);
+      out->lag_measured = true;
+    }
+  }
+  out->positions_ms = out->received_ms - static_cast<unsigned long>(out->lag_ms);
 }
 
 void setFailure(Outcome* out, FetchStatus status, int code, const char* detail = "") {
@@ -437,6 +478,8 @@ bool fetchAircraft(const Request& req, Aircraft* out, Outcome* outcome) {
   }
   s_trace.body = internalFreeKb();
   s_trace.body_bytes = payload.length();
+  outcome->received_ms = std::max(millis(), 1UL);  // 0 means "never"
+  outcome->received_epoch_ms = epochMsIfSynced();
   http.end();
   s_trace.closed = internalFreeKb();
   tls_guard.release();
@@ -463,6 +506,10 @@ bool fetchAircraft(const Request& req, Aircraft* out, Outcome* outcome) {
 
   outcome->status = FetchStatus::Ok;
   outcome->count = 0;
+  // readsb's "now" is seconds in aircraft.json and ms in the API; normalise to ms.
+  const double api_now = doc["now"] | 0.0;
+  outcome->api_now_ms = api_now > 1e11 ? api_now : api_now * 1000.0;
+  setPositionsTime(outcome);
 
   JsonArray ac = doc["ac"].as<JsonArray>();
   if (ac.isNull()) {
@@ -502,6 +549,123 @@ bool fetchAircraft(const Request& req, Aircraft* out, Outcome* outcome) {
   return true;
 }
 
+/** One aircraft's dead-reckoning miss, for logDeadReckonMisses(). */
+struct DrMiss {
+  const char* hex;
+  float dt_s;
+  float gs_knots;
+  float track_from;
+  float track_to;
+  float along_m;  // + = new fix ahead of the prediction
+  float cross_m;  // + = right of the old track
+  float seen_from;
+  float seen_to;
+};
+
+float medianOf(float* v, size_t n) {
+  std::sort(v, v + n);
+  return n % 2 == 1 ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
+
+/**
+ * Diagnostic (config::kAdsbLogDeadReckon): for each aircraft in both the previous and the new
+ * list, projects the previous fix along its track and speed to the new fix's time and logs how
+ * far off it was, split along and across the track. Fix times are positions_ms - seen_pos, the
+ * same times the display extrapolates from; "lag" is how old the server's "now" was on arrival
+ * ("default" before SNTP sync). Runs on the fetch task, which is the only writer of the lists.
+ */
+void logDeadReckonMisses(const Aircraft* prev, size_t prev_count,
+                         unsigned long prev_positions_ms, const Aircraft* cur, size_t cur_count,
+                         const Outcome& outcome) {
+  constexpr float kKmPerDegLat = 111.0f;
+  constexpr float kDegToRad = 0.01745329252f;
+  constexpr float kKmPerKnotSecond = 1.852f / 3600.0f;
+  constexpr float kMinFixGapS = 0.5f;  // a fix this close to the last one is the same fix
+  constexpr size_t kMaxDetailLines = 8;
+
+  char lag[24];
+  snprintf(lag, sizeof(lag), "%.2f s%s", outcome.lag_ms / 1000.0,
+           outcome.lag_measured ? "" : " (default)");
+  if (prev_count == 0) {
+    Serial.printf("DR fetch: lag %s, no previous list\n", lag);
+    return;
+  }
+
+  DrMiss misses[kMaxAircraft];
+  size_t n = 0;
+  size_t same_fix = 0;
+  for (size_t i = 0; i < cur_count; ++i) {
+    const Aircraft& new_ac = cur[i];
+    const Aircraft* old_ac = nullptr;
+    for (size_t j = 0; j < prev_count; ++j) {
+      if (strcmp(prev[j].hex, new_ac.hex) == 0) {
+        old_ac = &prev[j];
+        break;
+      }
+    }
+    if (old_ac == nullptr || !old_ac->has_track || old_ac->gs_knots <= 0.0f) {
+      continue;
+    }
+    // Fix times relative to millis(); the wrap-around in the subtraction is harmless.
+    const float dt_s = static_cast<float>(outcome.positions_ms - prev_positions_ms) / 1000.0f -
+                       new_ac.seen_pos_s + old_ac->seen_pos_s;
+    if (dt_s < kMinFixGapS) {
+      ++same_fix;
+      continue;
+    }
+    const float cos_lat = cosf(old_ac->lat * kDegToRad);
+    const float moved_x = (new_ac.lon - old_ac->lon) * kKmPerDegLat * cos_lat;
+    const float moved_y = (new_ac.lat - old_ac->lat) * kKmPerDegLat;
+    const float rad = old_ac->track_deg * kDegToRad;
+    const float s = sinf(rad);
+    const float c = cosf(rad);
+    const float predicted_km = old_ac->gs_knots * kKmPerKnotSecond * dt_s;
+    const float ex = moved_x - s * predicted_km;
+    const float ey = moved_y - c * predicted_km;
+    DrMiss& m = misses[n++];
+    m.hex = new_ac.hex;
+    m.dt_s = dt_s;
+    m.gs_knots = old_ac->gs_knots;
+    m.track_from = old_ac->track_deg;
+    m.track_to = new_ac.track_deg;
+    m.along_m = (ex * s + ey * c) * 1000.0f;
+    m.cross_m = (ex * c - ey * s) * 1000.0f;
+    m.seen_from = old_ac->seen_pos_s;
+    m.seen_to = new_ac.seen_pos_s;
+  }
+
+  if (n == 0) {
+    Serial.printf("DR fetch: lag %s, 0 matched (%u same fix)\n", lag,
+                  static_cast<unsigned>(same_fix));
+    return;
+  }
+  float along[kMaxAircraft];
+  float cross_abs[kMaxAircraft];
+  float along_min = misses[0].along_m;
+  float along_max = misses[0].along_m;
+  float cross_max = 0.0f;
+  for (size_t k = 0; k < n; ++k) {
+    along[k] = misses[k].along_m;
+    cross_abs[k] = fabsf(misses[k].cross_m);
+    along_min = std::min(along_min, misses[k].along_m);
+    along_max = std::max(along_max, misses[k].along_m);
+    cross_max = std::max(cross_max, cross_abs[k]);
+  }
+  Serial.printf("DR fetch: lag %s, %u matched (%u same fix), along med %+.0f m (%+.0f..%+.0f), "
+                "|cross| med %.0f m max %.0f\n",
+                lag, static_cast<unsigned>(n), static_cast<unsigned>(same_fix),
+                medianOf(along, n), along_min, along_max, medianOf(cross_abs, n), cross_max);
+  for (size_t k = 0; k < n && k < kMaxDetailLines; ++k) {
+    const DrMiss& m = misses[k];
+    float turn = m.track_to - m.track_from;
+    turn -= 360.0f * floorf((turn + 180.0f) / 360.0f);
+    Serial.printf("DR %s dt %.1f gs %.0f trk %.0f%+.0f along %+.0f cross %+.0f m "
+                  "seen %.1f>%.1f\n",
+                  m.hex, m.dt_s, m.gs_knots, m.track_from, turn, m.along_m, m.cross_m,
+                  m.seen_from, m.seen_to);
+  }
+}
+
 /**
  * Makes a fetch's result the current one, unless invalidate() ran since it started. A
  * failure keeps the last good list (aircraftFresh() expires it) and only updates the status.
@@ -516,7 +680,8 @@ void publish(const Outcome& outcome, uint32_t generation) {
   s_published = outcome;
   if (outcome.status == FetchStatus::Ok) {
     std::swap(s_aircraft, s_staging);  // the old list becomes the next staging area
-    s_last_ok_ms = std::max(millis(), 1UL);  // 0 means "never"
+    s_last_ok_ms = outcome.received_ms;
+    s_positions_ms = outcome.positions_ms;
   } else {
     s_published.count = kept_count;
   }
@@ -554,6 +719,18 @@ void fetchTask(void*) {
     fetched = true;
     Outcome outcome;
     fetchAircraft(req, s_staging, &outcome);
+    if (config::kAdsbLogDeadReckon && outcome.status == FetchStatus::Ok) {
+      size_t prev_count = 0;
+      unsigned long prev_positions_ms = 0;
+      {
+        Lock lock;
+        prev_count = s_last_ok_ms != 0 ? s_published.count : 0;
+        prev_positions_ms = s_positions_ms;
+      }
+      // s_aircraft only changes in publish(), on this task, so it's safe to read here.
+      logDeadReckonMisses(s_aircraft, prev_count, prev_positions_ms, s_staging, outcome.count,
+                          outcome);
+    }
     publish(outcome, generation);
 
     const unsigned long elapsed = millis() - last_start;
@@ -638,6 +815,7 @@ size_t aircraftSnapshot(Aircraft* out, size_t max_count, Snapshot* meta) {
   memcpy(meta->error_detail, s_published.error_detail, sizeof(meta->error_detail));
   meta->fresh = s_last_ok_ms != 0 && millis() - s_last_ok_ms <= config::kAdsbStaleAfterMs;
   meta->fetched_ms = s_last_ok_ms;
+  meta->positions_ms = s_positions_ms;
   return n;
 }
 
