@@ -337,28 +337,52 @@ void applyTagStyle() {
   displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
 }
 
-/** A tag's non-empty lines (callsign, type, altitude) and their widths; tag font applied. */
+enum class ClimbArrow : uint8_t { None, Up, Down };
+
+/** Up or down when the aircraft is airborne and climbing or descending faster than kClimbArrowMinFpm. */
+ClimbArrow climbArrowFor(const services::adsb::Aircraft& plane) {
+  if (plane.alt_state != services::adsb::AltState::Airborne || !plane.has_vrate) {
+    return ClimbArrow::None;
+  }
+  if (plane.vrate_fpm > radar::kClimbArrowMinFpm) {
+    return ClimbArrow::Up;
+  }
+  if (plane.vrate_fpm < -radar::kClimbArrowMinFpm) {
+    return ClimbArrow::Down;
+  }
+  return ClimbArrow::None;
+}
+
+/**
+ * A tag's non-empty lines (callsign, type, altitude) and their widths; tag font applied.
+ * The altitude line may end in a climb arrow, which its width includes.
+ */
 struct TagText {
   const char* lines[3];
   uint16_t colors[3];
   int widths[3];
+  ClimbArrow arrows[3];
   uint8_t count;
 };
 
+constexpr int kClimbArrowExtentPx = radar::kClimbArrowGapPx + radar::kClimbArrowWidthPx;
+
 TagText tagText(const services::adsb::Aircraft& plane, uint16_t alt_color) {
   TagText text{};
-  const auto add = [&text](const char* line, uint16_t color) {
+  const auto add = [&text](const char* line, uint16_t color, ClimbArrow arrow) {
     if (line[0] == '\0') {
       return;
     }
     text.lines[text.count] = line;
     text.colors[text.count] = color;
-    text.widths[text.count] = canvas.textWidth(line);
+    text.arrows[text.count] = arrow;
+    text.widths[text.count] =
+        canvas.textWidth(line) + (arrow != ClimbArrow::None ? kClimbArrowExtentPx : 0);
     ++text.count;
   };
-  add(plane.callsign, radar::kColorLabel);
-  add(plane.type, radar::kColorTagType);
-  add(plane.alt, alt_color);
+  add(plane.callsign, radar::kColorLabel, ClimbArrow::None);
+  add(plane.type, radar::kColorTagType, ClimbArrow::None);
+  add(plane.alt, alt_color, climbArrowFor(plane));
   return text;
 }
 
@@ -370,26 +394,31 @@ int tagWidth(const TagText& text, uint8_t lines) {
   return w;
 }
 
-/** The first `lines` lines of the tag in its placed box, lined up toward the icon. */
+/**
+ * The first `lines` lines of the tag in its placed box, lined up toward the icon. Each line
+ * is placed by its full width, so a climb arrow stays at the end of the altitude even when
+ * the tag is right-aligned.
+ */
 void drawTag(const TagText& text, uint8_t lines, const tags::ScreenRect& box, tags::Slot slot,
              int line_h) {
-  int x = box.left;
-  switch (tags::slotAlign(slot)) {
-    case tags::Align::Left:
-      canvas.setTextDatum(textdatum_t::top_left);
-      break;
-    case tags::Align::Center:
-      canvas.setTextDatum(textdatum_t::top_center);
-      x = box.left + box.w / 2;
-      break;
-    case tags::Align::Right:
-      canvas.setTextDatum(textdatum_t::top_right);
-      x = box.left + box.w;
-      break;
-  }
+  const tags::Align align = tags::slotAlign(slot);
+  canvas.setTextDatum(textdatum_t::top_left);
   for (uint8_t i = 0; i < lines; ++i) {
+    int x = box.left;
+    if (align == tags::Align::Center) {
+      x = box.left + (box.w - text.widths[i]) / 2;
+    } else if (align == tags::Align::Right) {
+      x = box.left + box.w - text.widths[i];
+    }
+    const int y = box.top + i * line_h;
     canvas.setTextColor(text.colors[i], radar::kColorBackground);
-    canvas.drawString(text.lines[i], x, box.top + i * line_h);
+    canvas.drawString(text.lines[i], x, y);
+    if (text.arrows[i] != ClimbArrow::None) {
+      // Vertically centred on the line, which is about where the digits sit.
+      const int arrow_x = x + text.widths[i] - radar::kClimbArrowWidthPx / 2;
+      radar::drawClimbArrow(arrow_x, y + line_h / 2, text.arrows[i] == ClimbArrow::Up,
+                            text.colors[i]);
+    }
   }
 }
 

@@ -166,6 +166,11 @@ constexpr Tri kRimArrowTris[] = {
     {{6.0f, 0.0f}, {-4.0f, 4.5f}, {-2.0f, 0.0f}},
 };
 
+/** Climb/descend arrow: 6 tall, 7 wide (kClimbArrowWidthPx), centred. */
+constexpr Tri kClimbArrowTris[] = {
+    {{3.0f, 0.0f}, {-3.0f, 3.5f}, {-3.0f, 0.0f}},
+};
+
 /** House: roof and body, plus a door cut out in the background colour. Radius 5.5. */
 constexpr Tri kHouseTris[] = {
     {{5.5f, 0.0f}, {1.0f, 5.0f}, {1.0f, 0.0f}},
@@ -185,6 +190,7 @@ constexpr Shape kGlider{kGliderTris, countOf(kGliderTris), nullptr, 0};
 constexpr Shape kHelicopter{kHelicopterTris, countOf(kHelicopterTris), kHelicopterCircles, 1};
 constexpr Shape kBalloon{kBalloonTris, countOf(kBalloonTris), kBalloonCircles, 1};
 constexpr Shape kRimArrow{kRimArrowTris, countOf(kRimArrowTris), nullptr, 0};
+constexpr Shape kClimbArrow{kClimbArrowTris, countOf(kClimbArrowTris), nullptr, 0};
 constexpr Shape kHouse{kHouseTris, countOf(kHouseTris), nullptr, 0};
 constexpr Shape kHouseDoor{kHouseDoorTris, countOf(kHouseDoorTris), nullptr, 0};
 
@@ -353,6 +359,10 @@ void drawAircraftIcon(int x, int y, float bearing_deg, IconShape shape, uint16_t
 
 void drawRimArrow(int x, int y, float bearing_deg, uint16_t color) {
   fillShape(x, y, bearing_deg, 1.0f, kRimArrow, color);
+}
+
+void drawClimbArrow(int x, int y, bool climbing, uint16_t color) {
+  fillShape(x, y, climbing ? 0.0f : 180.0f, 1.0f, kClimbArrow, color);
 }
 
 void drawHomeMarker(int x, int y, uint16_t color, uint16_t door_color) {

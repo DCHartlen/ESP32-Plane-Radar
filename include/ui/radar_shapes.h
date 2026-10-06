@@ -24,6 +24,9 @@ void drawAircraftIcon(int x, int y, float bearing_deg, IconShape shape, uint16_t
 /** Notched arrow for beyond-ring traffic, centred on (x, y), pointing along bearing_deg. */
 void drawRimArrow(int x, int y, float bearing_deg, uint16_t color);
 
+/** Up (climbing) or down triangle centred on (x, y), kClimbArrowWidthPx wide. */
+void drawClimbArrow(int x, int y, bool climbing, uint16_t color);
+
 /** House at the radar centre; door_color is normally the background. */
 void drawHomeMarker(int x, int y, uint16_t color, uint16_t door_color);
 
