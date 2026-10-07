@@ -84,6 +84,13 @@ constexpr int kBeyondRingMarkerRadiusPx = px(6.5f);
 constexpr int kBeyondRingScreenMarginPx = px(2);
 /** Text line height (fontHeight, px) for aircraft tags (slightly above scale label). */
 constexpr int kAircraftTagLabelHeightPx = px(13);
+/**
+ * Climb/descend arrow after a tag's altitude: a triangle (radar_shapes.cpp, 7 wide, 6 tall)
+ * shown when the vertical rate is beyond kClimbArrowMinFpm either way.
+ */
+constexpr int kClimbArrowMinFpm = 300;
+constexpr int kClimbArrowWidthPx = px(7);
+constexpr int kClimbArrowGapPx = px(2);
 
 /** RGB565 palette targets (applied in initPalette). */
 constexpr uint8_t kBgR = 4;

@@ -23,15 +23,32 @@ namespace {
 bool g_radar_visible = false;
 unsigned long g_wifi_down_since = 0;
 unsigned long g_last_reconnect_ms = 0;
-unsigned long g_last_adsb_fetch_ms = 0;
 int g_drawn_minute = -1;  // clock minute on screen, so a minute change redraws
+uint32_t g_drawn_publish = 0;  // services::adsb::publishCount() of the frame on screen
+unsigned long g_last_draw_ms = 0;  // start of the last radar frame
+
+/** Internal RAM headroom (bounce buffers and TLS both come from it). */
+void logInternalHeap(const char* when) {
+  Serial.printf("Heap internal%s: free %u KB, min ever %u KB, largest block %u KB\n", when,
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024,
+                heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024,
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
+}
+
+/** Draws a radar frame. `log` prints its timing; animation frames in between pass false. */
+void drawRadar(bool log) {
+  // Read before drawing: a fetch that publishes mid-frame gets its own frame next pass.
+  g_drawn_publish = services::adsb::publishCount();
+  g_last_draw_ms = millis();
+  ui::radarDisplayDraw(log);
+}
 
 void showRadarIfConnected() {
   if (WiFi.status() != WL_CONNECTED) {
     g_radar_visible = false;
     return;
   }
-  ui::radarDisplayDraw();
+  drawRadar(true);
   g_radar_visible = true;
 }
 
@@ -53,22 +70,8 @@ void handleButtons() {
                 ui::radar::rangeCurrent().outer_km);
 
   if (g_radar_visible && WiFi.status() == WL_CONNECTED) {
-    ui::radarDisplayDraw();
+    drawRadar(true);
   }
-}
-
-void fetchAndDrawAircraft() {
-  const float fetch_km = ui::radar::fetchRadiusKm();
-  // Redraw on failure too, so stale aircraft are replaced by the error once they expire.
-  services::adsb::fetchUpdate(services::location::lat(), services::location::lon(),
-                              fetch_km);
-  ui::radarDisplayRefreshAircraft();
-  // Internal RAM headroom (bounce buffers and TLS both come from it).
-  Serial.printf("Heap internal: free %u KB, min ever %u KB, largest block %u KB\n",
-                heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024,
-                heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024,
-                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
-  handleButtons();
 }
 
 }  // namespace
@@ -88,6 +91,7 @@ void setup() {
                 static_cast<unsigned>(ESP.getFreePsram() / 1024));
 
   displayInit();
+  logInternalHeap(" (display up)");
   // Wi-Fi's first connect writes to flash, which can stall the panel refill and leave the
   // image shifted up. Re-align the scan-out once the link is up.
   WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) { displayResync(); },
@@ -102,9 +106,12 @@ void setup() {
   services::location::init();
   ui::radar::rangeInit();
   services::clock::init();
-  services::adsb::setPollFn(wifiLoop);
+  // Fetches on core 0 from here on, once loop() enables it (Wi-Fi up).
+  services::adsb::startFetchTask();
 
-  if (wifiSetupConnect()) {
+  const bool connected = wifiSetupConnect();
+  logInternalHeap(" (Wi-Fi setup done)");
+  if (connected) {
     showRadarIfConnected();
   }
 }
@@ -114,10 +121,12 @@ void loop() {
   wifiLoop();
 
   if (WiFi.status() != WL_CONNECTED) {
+    services::adsb::setEnabled(false);
     if (g_radar_visible) {
       Serial.println("WiFi lost — will reconnect");
       g_radar_visible = false;
-      // Don't bring the old aircraft back when the radar returns.
+      // Don't bring the old aircraft back when the radar returns (a fetch still in flight
+      // is dropped too).
       services::adsb::invalidate();
     }
 
@@ -137,16 +146,26 @@ void loop() {
   } else {
     g_wifi_down_since = 0;
     services::clock::loop();
+    // The fetch task picks up a new radius (range change) or location right away.
+    services::adsb::setRequest(services::location::lat(), services::location::lon(),
+                               ui::radar::fetchRadiusKm());
+    services::adsb::setEnabled(true);
     // Read before drawing: if the minute ticks over mid-frame, the next pass redraws.
     const int minute = services::clock::minuteOfDay();
+    const uint32_t published = services::adsb::publishCount();
     if (!g_radar_visible) {
       showRadarIfConnected();
-    } else if (millis() - g_last_adsb_fetch_ms >= config::kAdsbFetchIntervalMs) {
-      g_last_adsb_fetch_ms = millis();
-      fetchAndDrawAircraft();
+    } else if (published != g_drawn_publish) {
+      // A fetch finished. Redraw on failure too, so stale aircraft give way to the error.
+      drawRadar(true);
+      logInternalHeap("");
+    } else if (ui::radarDisplayAnimating() &&
+               millis() - g_last_draw_ms >= config::kRadarRedrawIntervalMs) {
+      // Dead reckoning moves the aircraft between fetches.
+      drawRadar(false);
     } else if (minute != g_drawn_minute) {
-      // Frames normally come every fetch; this keeps the clock from lagging up to 5 s.
-      ui::radarDisplayDraw();
+      // Nothing is moving, so frames only come with fetches; keep the clock from lagging.
+      drawRadar(false);
     }
     g_drawn_minute = minute;
   }

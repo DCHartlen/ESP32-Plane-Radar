@@ -15,6 +15,7 @@
 #include "services/adsb_client.h"
 #include "ui/radar_geometry.h"
 #include "services/clock.h"
+#include "ui/canvas_pixels.h"
 #include "ui/radar_range.h"
 #include "ui/radar_shapes.h"
 #include "ui/radar_theme.h"
@@ -39,10 +40,12 @@ uint16_t kColorAltUnknown = 0xFFFF;
 
 namespace {
 
-using radar::clipPointToOuterRing;
 using radar::distSqFromCenter;
-using radar::latLonToScreen;
+using radar::kmOffsetToScreenF;
 using radar::offsetKmFromCenter;
+
+constexpr float kKmPerKnotSecond = 1.852f / 3600.0f;
+constexpr float kDegToRad = 0.01745329252f;
 
 /** Parts of a frame, timed separately for the serial log (phase D1 profiling). */
 enum class Phase : uint8_t {
@@ -104,67 +107,56 @@ void logPhases() {
   Serial.println(line);
 }
 
-// Direct framebuffer access for hot paths. LovyanGFX's per-pixel calls cost ~1 µs each;
-// these write the canvas buffer (RGB565, native byte order) themselves.
-constexpr int kFbW = config::kDisplayWidth;
-constexpr int kFbH = config::kDisplayHeight;
-
-/** Buffer index of canvas pixel (x, y), which must be on screen; rotation 2 turns it 180°. */
-inline size_t fbIndex(int x, int y) {
-  return config::kDisplayRotate180 ? static_cast<size_t>(kFbH - 1 - y) * kFbW + (kFbW - 1 - x)
-                                   : static_cast<size_t>(y) * kFbW + x;
-}
-
-/** color over dst at alpha 0–255. */
-inline uint16_t blend565(uint32_t dst, uint32_t color, uint32_t alpha) {
-  const uint32_t keep = 255 - alpha;
-  const uint32_t r = ((dst >> 11) * keep + (color >> 11) * alpha + 127) / 255;
-  const uint32_t g = (((dst >> 5) & 0x3F) * keep + ((color >> 5) & 0x3F) * alpha + 127) / 255;
-  const uint32_t b = ((dst & 0x1F) * keep + (color & 0x1F) * alpha + 127) / 255;
-  return static_cast<uint16_t>((r << 11) | (g << 5) | b);
-}
-
 /**
  * Anti-aliased line of half-width half_w, flat-ended, written straight into the canvas.
  * drawWideLine tests every pixel in a box around the line and reads each one it touches
  * back through LovyanGFX (~1.4 ms for a speed vector). This walks the major axis and, at
  * each step, fills the span across the line: covered pixels solid, the edges blended by
- * how much of them the span covers.
+ * how much of them the span covers. The ends take fractional coordinates too, so a moving
+ * vector slides instead of stepping a pixel at a time.
  */
-void drawThickLine(int x0, int y0, int x1, int y1, float half_w, uint16_t color) {
+void drawThickLine(float x0, float y0, float x1, float y1, float half_w, uint16_t color) {
   uint16_t* fb = static_cast<uint16_t*>(canvas.getBuffer());
   if (fb == nullptr) {
     canvas.drawWideLine(x0, y0, x1, y1, half_w, color);
     return;
   }
-  const bool steep = std::abs(y1 - y0) > std::abs(x1 - x0);
+  const bool steep = fabsf(y1 - y0) > fabsf(x1 - x0);
   // u runs along the major axis, v across it.
-  int u0 = steep ? y0 : x0;
-  int v0 = steep ? x0 : y0;
-  int u1 = steep ? y1 : x1;
-  int v1 = steep ? x1 : y1;
+  float u0 = steep ? y0 : x0;
+  float v0 = steep ? x0 : y0;
+  float u1 = steep ? y1 : x1;
+  float v1 = steep ? x1 : y1;
   if (u0 > u1) {
     std::swap(u0, u1);
     std::swap(v0, v1);
   }
-  const int du = u1 - u0;
-  const int dv = v1 - v0;
-  if (du == 0) {  // a single point
+  const float du = u1 - u0;
+  const float dv = v1 - v0;
+  if (du < 0.01f) {  // a single point
     return;
   }
-  const float slope = static_cast<float>(dv) / du;
+  const float slope = dv / du;
   // Measured along v, the line is wider than half_w by 1 / cos of its angle to u.
-  const float half_span = half_w * sqrtf(static_cast<float>(du * du + dv * dv)) / du;
+  const float half_span = half_w * sqrtf(du * du + dv * dv) / du;
 
-  for (int u = u0; u <= u1; ++u) {
-    const float vc = v0 + slope * static_cast<float>(u - u0);
+  // Pixel u covers [u - 0.5, u + 0.5]; the end pixels count only the part inside [u0, u1].
+  const int u_first = static_cast<int>(floorf(u0 + 0.5f));
+  const int u_last = static_cast<int>(ceilf(u1 - 0.5f));
+  for (int u = u_first; u <= u_last; ++u) {
+    const float along = std::min(u1, u + 0.5f) - std::max(u0, u - 0.5f);
+    if (along <= 0.004f) {
+      continue;
+    }
+    const float vc = v0 + slope * (static_cast<float>(u) - u0);
     const float lo = vc - half_span;
     const float hi = vc + half_span;
     // Pixel v covers [v - 0.5, v + 0.5].
     const int v_first = static_cast<int>(floorf(lo + 0.5f));
     const int v_last = static_cast<int>(ceilf(hi - 0.5f));
     for (int v = v_first; v <= v_last; ++v) {
-      const float cover = std::min(hi, v + 0.5f) - std::max(lo, v - 0.5f);
+      const float cover =
+          std::min(along, 1.0f) * (std::min(hi, v + 0.5f) - std::max(lo, v - 0.5f));
       if (cover <= 0.004f) {
         continue;
       }
@@ -257,8 +249,8 @@ AircraftColors aircraftColors(const services::adsb::Aircraft& plane) {
 }
 
 /** Icons point along the ground track (matching the speed vector), else the nose heading. */
-float iconBearing(const services::adsb::Aircraft& plane) {
-  return plane.has_track ? plane.track_deg : plane.nose_deg;
+float iconBearing(const services::adsb::Aircraft& plane, float shown_track_deg) {
+  return plane.has_track ? shown_track_deg : plane.nose_deg;
 }
 
 float innerRingMaxKm() {
@@ -275,12 +267,12 @@ bool isInsideOuterRing(int x, int y) {
   return distSqFromCenter(x, y) <= max_r * max_r;
 }
 
-/** Rim marker from true bearing; always on screen edge (even if target is 50+ km away). */
-bool beyondRingMarkerFromLatLon(float lat, float lon, int* out_x, int* out_y) {
-  float dx_km = 0.0f;
-  float dy_km = 0.0f;
-  float dist_km = 0.0f;
-  offsetKmFromCenter(lat, lon, &dx_km, &dy_km, &dist_km);
+/**
+ * Rim marker from true bearing; always on screen edge (even if target is 50+ km away).
+ * Unrounded, so a marker sliding round the rim doesn't step.
+ */
+bool beyondRingMarkerFromKm(float dx_km, float dy_km, float dist_km, float* out_x,
+                            float* out_y) {
   if (dist_km < 0.01f) {
     return false;
   }
@@ -288,80 +280,103 @@ bool beyondRingMarkerFromLatLon(float lat, float lon, int* out_x, int* out_y) {
     return false;
   }
 
-  const int cx = radar::kCenterX;
-  const int cy = radar::kCenterY;
   // Inset by the marker radius too, so the whole marker stays inside the round screen.
-  const int rim_r = radar::kCenterX - radar::kBeyondRingScreenMarginPx -
-                    radar::kBeyondRingMarkerRadiusPx;
+  const float rim_r = static_cast<float>(radar::kCenterX - radar::kBeyondRingScreenMarginPx -
+                                         radar::kBeyondRingMarkerRadiusPx);
   const float angle_rad = atan2f(dx_km, dy_km);
 
-  *out_x = cx + static_cast<int>(lroundf(sinf(angle_rad) * rim_r));
-  *out_y = cy - static_cast<int>(lroundf(cosf(angle_rad) * rim_r));
+  *out_x = radar::kCenterX + sinf(angle_rad) * rim_r;
+  *out_y = radar::kCenterY - cosf(angle_rad) * rim_r;
   return true;
 }
 
 /** Notched arrow centred on (x, y), pointing along track_deg; a dot if there's no track to show. */
-void drawBeyondRingMarker(int x, int y, float track_deg, bool show_arrow, uint16_t color) {
+void drawBeyondRingMarker(float x, float y, float track_deg, bool show_arrow, uint16_t color) {
   if (show_arrow) {
     radar::drawRimArrow(x, y, track_deg, color);
   } else {
-    canvas.fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx, color);
+    radar::drawRimDot(x, y, color);
   }
 }
 
 /** Screen length of the distance flown in the current range's track_horizon_s. */
-int speedLineLengthPx(float gs_knots) {
+float speedLineLengthPx(float gs_knots) {
   if (gs_knots <= 0.0f) {
-    return 0;
+    return 0.0f;
   }
-  constexpr float kKmPerKnotSecond = 1.852f / 3600.0f;
   const radar::RangePreset& range = radar::rangeCurrent();
-  const float px = gs_knots * kKmPerKnotSecond * range.track_horizon_s *
-                   radar::kGridOuterRadius / range.outer_km;
-  return static_cast<int>(px + 0.5f);
+  return gs_knots * kKmPerKnotSecond * range.track_horizon_s * radar::kGridOuterRadius /
+         range.outer_km;
 }
 
-/** End of the speed vector, clipped to the outer ring; false if there's nothing to draw. */
-bool speedVectorEnd(int cx, int cy, float track_deg, float gs_knots, int* ex, int* ey) {
-  const int len = speedLineLengthPx(gs_knots);
-  if (len <= 0) {
+/**
+ * End of the speed vector from (cx, cy), clipped to the outer ring; false if there's nothing
+ * to draw. Unrounded, like the icon it starts from.
+ */
+bool speedVectorEnd(float cx, float cy, float track_deg, float gs_knots, float* ex,
+                    float* ey) {
+  const float len = speedLineLengthPx(gs_knots);
+  if (len < 0.5f) {
     return false;
   }
 
-  constexpr float kDegToRad = 0.01745329252f;
   const float rad = track_deg * kDegToRad;
-  *ex = cx + static_cast<int>(lroundf(sinf(rad) * len));
-  *ey = cy - static_cast<int>(lroundf(cosf(rad) * len));
-  clipPointToOuterRing(cx, cy, ex, ey);
-  return *ex != cx || *ey != cy;
+  *ex = cx + sinf(rad) * len;
+  *ey = cy - cosf(rad) * len;
+  radar::clipPointToOuterRingF(cx, cy, ex, ey);
+  return fabsf(*ex - cx) >= 0.5f || fabsf(*ey - cy) >= 0.5f;
 }
 
 void applyTagStyle() {
   displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
 }
 
-/** A tag's non-empty lines (callsign, type, altitude) and their widths; tag font applied. */
+enum class ClimbArrow : uint8_t { None, Up, Down };
+
+/** Up or down when the aircraft is airborne and climbing or descending faster than kClimbArrowMinFpm. */
+ClimbArrow climbArrowFor(const services::adsb::Aircraft& plane) {
+  if (plane.alt_state != services::adsb::AltState::Airborne || !plane.has_vrate) {
+    return ClimbArrow::None;
+  }
+  if (plane.vrate_fpm > radar::kClimbArrowMinFpm) {
+    return ClimbArrow::Up;
+  }
+  if (plane.vrate_fpm < -radar::kClimbArrowMinFpm) {
+    return ClimbArrow::Down;
+  }
+  return ClimbArrow::None;
+}
+
+/**
+ * A tag's non-empty lines (callsign, type, altitude) and their widths; tag font applied.
+ * The altitude line may end in a climb arrow, which its width includes.
+ */
 struct TagText {
   const char* lines[3];
   uint16_t colors[3];
   int widths[3];
+  ClimbArrow arrows[3];
   uint8_t count;
 };
 
+constexpr int kClimbArrowExtentPx = radar::kClimbArrowGapPx + radar::kClimbArrowWidthPx;
+
 TagText tagText(const services::adsb::Aircraft& plane, uint16_t alt_color) {
   TagText text{};
-  const auto add = [&text](const char* line, uint16_t color) {
+  const auto add = [&text](const char* line, uint16_t color, ClimbArrow arrow) {
     if (line[0] == '\0') {
       return;
     }
     text.lines[text.count] = line;
     text.colors[text.count] = color;
-    text.widths[text.count] = canvas.textWidth(line);
+    text.arrows[text.count] = arrow;
+    text.widths[text.count] =
+        canvas.textWidth(line) + (arrow != ClimbArrow::None ? kClimbArrowExtentPx : 0);
     ++text.count;
   };
-  add(plane.callsign, radar::kColorLabel);
-  add(plane.type, radar::kColorTagType);
-  add(plane.alt, alt_color);
+  add(plane.callsign, radar::kColorLabel, ClimbArrow::None);
+  add(plane.type, radar::kColorTagType, ClimbArrow::None);
+  add(plane.alt, alt_color, climbArrowFor(plane));
   return text;
 }
 
@@ -373,26 +388,31 @@ int tagWidth(const TagText& text, uint8_t lines) {
   return w;
 }
 
-/** The first `lines` lines of the tag in its placed box, lined up toward the icon. */
+/**
+ * The first `lines` lines of the tag in its placed box, lined up toward the icon. Each line
+ * is placed by its full width, so a climb arrow stays at the end of the altitude even when
+ * the tag is right-aligned.
+ */
 void drawTag(const TagText& text, uint8_t lines, const tags::ScreenRect& box, tags::Slot slot,
              int line_h) {
-  int x = box.left;
-  switch (tags::slotAlign(slot)) {
-    case tags::Align::Left:
-      canvas.setTextDatum(textdatum_t::top_left);
-      break;
-    case tags::Align::Center:
-      canvas.setTextDatum(textdatum_t::top_center);
-      x = box.left + box.w / 2;
-      break;
-    case tags::Align::Right:
-      canvas.setTextDatum(textdatum_t::top_right);
-      x = box.left + box.w;
-      break;
-  }
+  const tags::Align align = tags::slotAlign(slot);
+  canvas.setTextDatum(textdatum_t::top_left);
   for (uint8_t i = 0; i < lines; ++i) {
+    int x = box.left;
+    if (align == tags::Align::Center) {
+      x = box.left + (box.w - text.widths[i]) / 2;
+    } else if (align == tags::Align::Right) {
+      x = box.left + box.w - text.widths[i];
+    }
+    const int y = box.top + i * line_h;
     canvas.setTextColor(text.colors[i], radar::kColorBackground);
-    canvas.drawString(text.lines[i], x, box.top + i * line_h);
+    canvas.drawString(text.lines[i], x, y);
+    if (text.arrows[i] != ClimbArrow::None) {
+      // Vertically centred on the line, which is about where the digits sit.
+      const int arrow_x = x + text.widths[i] - radar::kClimbArrowWidthPx / 2;
+      radar::drawClimbArrow(arrow_x, y + line_h / 2, text.arrows[i] == ClimbArrow::Up,
+                            text.colors[i]);
+    }
   }
 }
 
@@ -404,17 +424,121 @@ struct TagStats {
 };
 TagStats s_tag_stats{};
 
+/** This frame's copy of the fetch task's results (the list is in PSRAM, ~5 KB). */
+services::adsb::Aircraft* s_planes = nullptr;
+services::adsb::Snapshot s_snapshot{};
+
+/**
+ * Dead reckoning: the aircraft's offset from the center in km, moved along its track by the
+ * age of its position (seen_pos plus the time since the server's "now"), capped at
+ * kDeadReckonMaxSec.
+ * Returns true if it's still moving (has a track and speed, and isn't at the cap yet).
+ */
+bool deadReckonedOffsetKm(const services::adsb::Aircraft& plane, unsigned long now_ms,
+                          float* dx_km, float* dy_km, float* dist_km) {
+  offsetKmFromCenter(plane.lat, plane.lon, dx_km, dy_km, dist_km);
+  if (!plane.has_track || plane.gs_knots <= 0.0f || s_snapshot.fetched_ms == 0) {
+    return false;
+  }
+  // positions_ms is the server's "now", so the age includes how old its data was on arrival.
+  const float since_now_s = static_cast<float>(now_ms - s_snapshot.positions_ms) / 1000.0f;
+  const float raw_age_s = std::max(plane.seen_pos_s, 0.0f) + since_now_s;
+  const float age_s = std::min(raw_age_s, config::kDeadReckonMaxSec);
+  const float km = plane.gs_knots * kKmPerKnotSecond * age_s;
+  const float rad = plane.track_deg * kDegToRad;
+  *dx_km += sinf(rad) * km;
+  *dy_km += cosf(rad) * km;
+  *dist_km = sqrtf((*dx_km) * (*dx_km) + (*dy_km) * (*dy_km));
+  return raw_age_s < config::kDeadReckonMaxSec;
+}
+
+/** Set by drawAircraft(): some aircraft on screen is still being moved by dead reckoning. */
+bool s_animating = false;
+
+/**
+ * The track drawn for one aircraft (icon, speed vector, rim arrow), keyed by hex. Reported
+ * tracks wobble 1-3 degrees between fetches even in straight flight, which flicks the long
+ * speed vector sideways every fetch; this eases toward each new value instead.
+ */
+struct ShownTrack {
+  char hex[sizeof(services::adsb::Aircraft::hex)];
+  float track_deg;
+  unsigned long updated_ms;
+};
+ShownTrack s_shown_tracks[services::adsb::kMaxAircraft] = {};
+
+/** d wrapped into [-180, 180). */
+float wrapDeg180(float d) { return d - 360.0f * floorf((d + 180.0f) / 360.0f); }
+
+/**
+ * The plane's track eased toward the reported one with time constant kTrackSmoothingSec. A
+ * plane not drawn recently takes the reported track as is, reusing the stalest slot. Only the
+ * drawing uses this; dead reckoning moves along the reported track, which predicts the next
+ * fix to a few metres.
+ */
+float shownTrackDeg(const services::adsb::Aircraft& plane, unsigned long now_ms) {
+  if (!plane.has_track || plane.hex[0] == '\0') {
+    return plane.track_deg;
+  }
+  ShownTrack* slot = nullptr;
+  ShownTrack* stalest = &s_shown_tracks[0];
+  for (ShownTrack& entry : s_shown_tracks) {
+    if (strcmp(entry.hex, plane.hex) == 0) {
+      slot = &entry;
+      break;
+    }
+    if (entry.hex[0] == '\0') {
+      stalest = &entry;  // an empty slot beats any used one
+    } else if (stalest->hex[0] != '\0' &&
+               now_ms - entry.updated_ms > now_ms - stalest->updated_ms) {
+      stalest = &entry;
+    }
+  }
+  if (slot == nullptr) {
+    slot = stalest;
+    strncpy(slot->hex, plane.hex, sizeof(slot->hex));
+    slot->hex[sizeof(slot->hex) - 1] = '\0';
+    slot->track_deg = plane.track_deg;
+    slot->updated_ms = now_ms;
+    return slot->track_deg;
+  }
+  const float dt_s = static_cast<float>(now_ms - slot->updated_ms) / 1000.0f;
+  const float step = 1.0f - expf(-dt_s / config::kTrackSmoothingSec);
+  float track = slot->track_deg + wrapDeg180(plane.track_deg - slot->track_deg) * step;
+  track -= 360.0f * floorf(track / 360.0f);
+  slot->track_deg = track;
+  slot->updated_ms = now_ms;
+  return track;
+}
+
+void takeSnapshot() {
+  if (s_planes == nullptr) {
+    s_planes = static_cast<services::adsb::Aircraft*>(heap_caps_malloc(
+        sizeof(services::adsb::Aircraft) * services::adsb::kMaxAircraft, MALLOC_CAP_SPIRAM));
+  }
+  if (s_planes == nullptr) {
+    s_snapshot = services::adsb::Snapshot{};  // nothing to draw, shows "Waiting for data"
+    return;
+  }
+  services::adsb::aircraftSnapshot(s_planes, services::adsb::kMaxAircraft, &s_snapshot);
+}
+
 struct AircraftDrawItem {
   size_t index = 0;
-  int x = 0;
+  float fx = 0.0f;  // unrounded, for drawing
+  float fy = 0.0f;
+  int x = 0;  // rounded, for the tag layout
   int y = 0;
   int dist_sq = 0;
+  float track_deg = 0.0f;  // smoothed, see shownTrackDeg()
   AircraftColors colors{};
   radar::IconShape shape = radar::IconShape::Generic;
 };
 
 struct BeyondRingDrawItem {
-  int x = 0;
+  float fx = 0.0f;  // unrounded, for drawing
+  float fy = 0.0f;
+  int x = 0;  // rounded, for the tag layout
   int y = 0;
   int dist_sq = 0;
   float track_deg = 0.0f;
@@ -447,9 +571,8 @@ void sortBeyondRingFarFirst(BeyondRingDrawItem* items, size_t count) {
 }
 
 void drawAircraft() {
-
-  const size_t n = services::adsb::aircraftCount();
-  const services::adsb::Aircraft* planes = services::adsb::aircraftList();
+  const size_t n = s_snapshot.count;
+  const services::adsb::Aircraft* planes = s_planes;
 
   AircraftDrawItem items[services::adsb::kMaxAircraft];
   BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
@@ -458,36 +581,49 @@ void drawAircraft() {
 
   {
   PhaseScope timer(Phase::Classify);
+  const unsigned long now_ms = millis();
   for (size_t i = 0; i < n; ++i) {
     float dx_km = 0.0f;
     float dy_km = 0.0f;
     float dist_km = 0.0f;
-    offsetKmFromCenter(planes[i].lat, planes[i].lon, &dx_km, &dy_km, &dist_km);
+    // Extrapolated, so aircraft cross the ring between fetches instead of jumping.
+    const bool moving = deadReckonedOffsetKm(planes[i], now_ms, &dx_km, &dy_km, &dist_km);
+    const float shown_track = shownTrackDeg(planes[i], now_ms);
 
     if (isInsideOuterRingKm(dist_km)) {
-      int x = 0;
-      int y = 0;
-      latLonToScreen(planes[i].lat, planes[i].lon, &x, &y);
+      float fx = 0.0f;
+      float fy = 0.0f;
+      kmOffsetToScreenF(dx_km, dy_km, &fx, &fy);
+      const int x = static_cast<int>(lroundf(fx));
+      const int y = static_cast<int>(lroundf(fy));
       items[draw_count].index = i;
+      items[draw_count].fx = fx;
+      items[draw_count].fy = fy;
       items[draw_count].x = x;
       items[draw_count].y = y;
       items[draw_count].dist_sq = distSqFromCenter(x, y);
+      items[draw_count].track_deg = shown_track;
       items[draw_count].colors = aircraftColors(planes[i]);
       items[draw_count].shape = radar::iconShapeFor(planes[i]);
       ++draw_count;
+      // Only in-ring aircraft count: a rim marker's bearing barely changes between frames.
+      s_animating |= moving;
       continue;
     }
 
-    int rim_x = 0;
-    int rim_y = 0;
-    if (!beyondRingMarkerFromLatLon(planes[i].lat, planes[i].lon, &rim_x,
-                                    &rim_y)) {
+    float rim_fx = 0.0f;
+    float rim_fy = 0.0f;
+    if (!beyondRingMarkerFromKm(dx_km, dy_km, dist_km, &rim_fx, &rim_fy)) {
       continue;
     }
+    const int rim_x = static_cast<int>(lroundf(rim_fx));
+    const int rim_y = static_cast<int>(lroundf(rim_fy));
+    rim[rim_count].fx = rim_fx;
+    rim[rim_count].fy = rim_fy;
     rim[rim_count].x = rim_x;
     rim[rim_count].y = rim_y;
     rim[rim_count].dist_sq = distSqFromCenter(rim_x, rim_y);
-    rim[rim_count].track_deg = planes[i].track_deg;
+    rim[rim_count].track_deg = shown_track;
     rim[rim_count].show_arrow = planes[i].has_track && planes[i].gs_knots > 0.0f;
     rim[rim_count].color = aircraftColors(planes[i]).icon;
     ++rim_count;
@@ -500,7 +636,7 @@ void drawAircraft() {
   {
   PhaseScope timer(Phase::Rim);
   for (size_t d = 0; d < rim_count; ++d) {
-    drawBeyondRingMarker(rim[d].x, rim[d].y, rim[d].track_deg, rim[d].show_arrow,
+    drawBeyondRingMarker(rim[d].fx, rim[d].fy, rim[d].track_deg, rim[d].show_arrow,
                          rim[d].color);
     tags::addCircle(rim[d].x, rim[d].y, radar::kBeyondRingMarkerRadiusPx);
   }
@@ -512,17 +648,20 @@ void drawAircraft() {
     const size_t i = items[d].index;
     const int x = items[d].x;
     const int y = items[d].y;
-    int ex = 0;
-    int ey = 0;
+    const float fx = items[d].fx;
+    const float fy = items[d].fy;
+    float ex = 0.0f;
+    float ey = 0.0f;
     // Drawn before the icon, so the part under it is hidden.
     if (planes[i].has_track &&
-        speedVectorEnd(x, y, planes[i].track_deg, planes[i].gs_knots, &ex, &ey)) {
+        speedVectorEnd(fx, fy, items[d].track_deg, planes[i].gs_knots, &ex, &ey)) {
       PhaseScope timer(Phase::Vectors);
-      drawThickLine(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth, items[d].colors.track);
-      tags::addSegment(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth);
+      drawThickLine(fx, fy, ex, ey, radar::kAircraftTrackLineHalfWidth, items[d].colors.track);
+      tags::addSegment(x, y, static_cast<int>(lroundf(ex)), static_cast<int>(lroundf(ey)),
+                       radar::kAircraftTrackLineHalfWidth);
     }
     PhaseScope timer(Phase::Icons);
-    radar::drawAircraftIcon(x, y, iconBearing(planes[i]), items[d].shape,
+    radar::drawAircraftIcon(fx, fy, iconBearing(planes[i], items[d].track_deg), items[d].shape,
                             items[d].colors.icon);
     tags::addCircle(x, y, radar::iconRadiusPx(items[d].shape), static_cast<int>(d));
   }
@@ -548,7 +687,7 @@ void drawAircraft() {
     req.y = items[d].y;
     req.icon_radius = radar::iconRadiusPx(items[d].shape);
     req.moving = plane.has_track && plane.gs_knots > 0.0f;
-    req.track_deg = plane.track_deg;
+    req.track_deg = items[d].track_deg;
 
     tags::ScreenRect box{};
     tags::Slot slot = tags::Slot::Right;
@@ -731,10 +870,10 @@ void addFixedTagObstacles(const tags::ScreenRect* clock_box) {
 /** Headline and detail for the empty radar, from how the last fetch went. */
 void describeFetchProblem(char* headline, size_t headline_len, char* detail, size_t detail_len) {
   using services::adsb::FetchStatus;
-  const int code = services::adsb::lastErrorCode();
+  const int code = s_snapshot.error_code;
   const char* title = "";
   detail[0] = '\0';
-  switch (services::adsb::lastStatus()) {
+  switch (s_snapshot.status) {
     case FetchStatus::Pending:
       title = "Waiting for data";
       break;
@@ -769,7 +908,7 @@ void describeFetchProblem(char* headline, size_t headline_len, char* detail, siz
       break;
     case FetchStatus::BadResponse:
       title = "Bad data from adsb.fi";
-      snprintf(detail, detail_len, "%s", services::adsb::lastErrorDetail());
+      snprintf(detail, detail_len, "%s", s_snapshot.error_detail);
       break;
   }
   snprintf(headline, headline_len, "%s", title);
@@ -1128,9 +1267,10 @@ void drawStaticGrid() {
 
 // Draw the grid and aircraft into the back framebuffer, then swap it on screen,
 // so labels never show an erase/redraw gap.
-void radarDisplayDraw() {
+void radarDisplayDraw(bool log) {
   const unsigned long t0 = millis();
   std::fill(std::begin(s_phase_us), std::end(s_phase_us), 0);
+  s_animating = false;
   initPalette();
   tags::beginFrame();
   drawStaticGrid();
@@ -1140,8 +1280,9 @@ void radarDisplayDraw() {
     PhaseScope timer(Phase::ClockLayout);
     clock_shown = layoutClock(&clock);
   }
+  takeSnapshot();
   // Old positions look live, so once the data goes stale show why instead.
-  const bool fresh = services::adsb::aircraftFresh();
+  const bool fresh = s_snapshot.fresh;
   if (fresh) {
     {
       PhaseScope timer(Phase::Obstacles);
@@ -1159,22 +1300,23 @@ void radarDisplayDraw() {
   canvas.setTextDatum(textdatum_t::top_left);
   const unsigned long t1 = millis();
   displayPresent();
+  if (!log) {
+    return;
+  }
   if (fresh) {
     Serial.printf("Radar frame: draw %lu ms, present %lu ms, %u aircraft, tags %u full, "
                   "%u short, %u hidden\n",
-                  t1 - t0, millis() - t1,
-                  static_cast<unsigned>(services::adsb::aircraftCount()),
+                  t1 - t0, millis() - t1, static_cast<unsigned>(s_snapshot.count),
                   static_cast<unsigned>(s_tag_stats.full),
                   static_cast<unsigned>(s_tag_stats.short_only),
                   static_cast<unsigned>(s_tag_stats.hidden));
   } else {
     Serial.printf("Radar frame: draw %lu ms, present %lu ms, %u aircraft (stale, hidden)\n",
-                  t1 - t0, millis() - t1,
-                  static_cast<unsigned>(services::adsb::aircraftCount()));
+                  t1 - t0, millis() - t1, static_cast<unsigned>(s_snapshot.count));
   }
   logPhases();
 }
 
-void radarDisplayRefreshAircraft() { radarDisplayDraw(); }
+bool radarDisplayAnimating() { return s_animating; }
 
 }  // namespace ui

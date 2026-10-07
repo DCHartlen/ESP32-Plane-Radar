@@ -1,5 +1,6 @@
 #include "ui/radar_geometry.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "services/radar_location.h"
@@ -25,17 +26,26 @@ void offsetKmFromCenter(float lat, float lon, float* dx_km, float* dy_km, float*
   *dist_km = sqrtf((*dx_km) * (*dx_km) + (*dy_km) * (*dy_km));
 }
 
-void latLonToScreen(float lat, float lon, int* out_x, int* out_y) {
-  const float outer_km = rangeCurrent().outer_km;
-  const float px_per_km = static_cast<float>(kGridOuterRadius) / outer_km;
+void kmOffsetToScreenF(float dx_km, float dy_km, float* out_x, float* out_y) {
+  const float px_per_km = static_cast<float>(kGridOuterRadius) / rangeCurrent().outer_km;
+  *out_x = static_cast<float>(kCenterX) + dx_km * px_per_km;
+  *out_y = static_cast<float>(kCenterY) - dy_km * px_per_km;
+}
 
+void kmOffsetToScreen(float dx_km, float dy_km, int* out_x, int* out_y) {
+  float x = 0.0f;
+  float y = 0.0f;
+  kmOffsetToScreenF(dx_km, dy_km, &x, &y);
+  *out_x = static_cast<int>(lroundf(x));
+  *out_y = static_cast<int>(lroundf(y));
+}
+
+void latLonToScreen(float lat, float lon, int* out_x, int* out_y) {
   float dx_km = 0.0f;
   float dy_km = 0.0f;
   float dist_km = 0.0f;
   offsetKmFromCenter(lat, lon, &dx_km, &dy_km, &dist_km);
-
-  *out_x = kCenterX + static_cast<int>(lroundf(dx_km * px_per_km));
-  *out_y = kCenterY - static_cast<int>(lroundf(dy_km * px_per_km));
+  kmOffsetToScreen(dx_km, dy_km, out_x, out_y);
 }
 
 int distSqFromCenter(int x, int y) {
@@ -67,6 +77,26 @@ void clipPointToOuterRing(int x0, int y0, int* x1, int* y1) {
   }
   *x1 = x0;
   *y1 = y0;
+}
+
+void clipPointToOuterRingF(float x0, float y0, float* x1, float* y1) {
+  const float r = static_cast<float>(kGridOuterRadius);
+  const float ax = x0 - kCenterX;
+  const float ay = y0 - kCenterY;
+  const float dx = *x1 - x0;
+  const float dy = *y1 - y0;
+  const float bx = ax + dx;
+  const float by = ay + dy;
+  if (bx * bx + by * by <= r * r) {
+    return;
+  }
+  // |a + t*d| = r, the root in [0, 1]; c <= 0 because (x0, y0) is inside.
+  const float a = dx * dx + dy * dy;
+  const float b = ax * dx + ay * dy;
+  const float c = ax * ax + ay * ay - r * r;
+  const float t = std::max(0.0f, (-b + sqrtf(std::max(0.0f, b * b - a * c))) / a);
+  *x1 = x0 + dx * t;
+  *y1 = y0 + dy * t;
 }
 
 }  // namespace ui::radar

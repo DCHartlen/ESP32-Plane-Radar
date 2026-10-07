@@ -92,6 +92,8 @@ constexpr int32_t kPanelPclkHz = 16000000;
 constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 36;
 /** Rotate the whole UI 180 degrees if the panel is mounted upside down. */
 constexpr bool kDisplayRotate180 = false;
+/** Radar frame interval (start to start) while aircraft are moving on screen. */
+constexpr unsigned long kRadarRedrawIntervalMs = 250;
 
 // --- Radar center defaults (overridden via WiFi setup portal) ---
 constexpr double kDefaultRadarLat = 52.3676;
@@ -107,6 +109,26 @@ constexpr float kAdsbFetchRadiusScale = 1.0f;
 constexpr bool kAdsbShowGroundAircraft = false;
 /** Log every parsed aircraft's fields (category, altitude, rate, squawk, ...) per fetch. */
 constexpr bool kAdsbLogFields = false;
+/**
+ * Log how far each new fix lands from where the previous one predicted (lines start "DR"),
+ * plus the server's reporting lag. Diagnostic for dead-reckoning snaps.
+ */
+constexpr bool kAdsbLogDeadReckon = false;
+/**
+ * How old adsb.fi's data is on arrival when it can't be measured (before SNTP sync). Measured
+ * 2026-10-05: 1.15-2.35 s, alternating between ~1.2 and ~2.2 s.
+ */
+constexpr unsigned long kAdsbDefaultLagMs = 1700;
+/**
+ * Aircraft are drawn moved along their track by the age of their position (seen_pos plus the
+ * time since the server's "now", see kAdsbDefaultLagMs), at most this far, so one that stops reporting doesn't fly off.
+ */
+constexpr float kDeadReckonMaxSec = 15.0f;
+/**
+ * Time constant for easing the drawn track (icon, speed vector) toward each newly reported
+ * one. Reported tracks wobble 1-3 degrees between fetches even in straight flight.
+ */
+constexpr float kTrackSmoothingSec = 1.0f;
 
 // --- Clock ---
 constexpr char kNtpServer1[] = "pool.ntp.org";
