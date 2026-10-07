@@ -15,6 +15,7 @@
 #include "services/adsb_client.h"
 #include "ui/radar_geometry.h"
 #include "services/clock.h"
+#include "ui/canvas_pixels.h"
 #include "ui/radar_range.h"
 #include "ui/radar_shapes.h"
 #include "ui/radar_theme.h"
@@ -39,9 +40,8 @@ uint16_t kColorAltUnknown = 0xFFFF;
 
 namespace {
 
-using radar::clipPointToOuterRing;
 using radar::distSqFromCenter;
-using radar::kmOffsetToScreen;
+using radar::kmOffsetToScreenF;
 using radar::offsetKmFromCenter;
 
 constexpr float kKmPerKnotSecond = 1.852f / 3600.0f;
@@ -107,67 +107,56 @@ void logPhases() {
   Serial.println(line);
 }
 
-// Direct framebuffer access for hot paths. LovyanGFX's per-pixel calls cost ~1 µs each;
-// these write the canvas buffer (RGB565, native byte order) themselves.
-constexpr int kFbW = config::kDisplayWidth;
-constexpr int kFbH = config::kDisplayHeight;
-
-/** Buffer index of canvas pixel (x, y), which must be on screen; rotation 2 turns it 180°. */
-inline size_t fbIndex(int x, int y) {
-  return config::kDisplayRotate180 ? static_cast<size_t>(kFbH - 1 - y) * kFbW + (kFbW - 1 - x)
-                                   : static_cast<size_t>(y) * kFbW + x;
-}
-
-/** color over dst at alpha 0–255. */
-inline uint16_t blend565(uint32_t dst, uint32_t color, uint32_t alpha) {
-  const uint32_t keep = 255 - alpha;
-  const uint32_t r = ((dst >> 11) * keep + (color >> 11) * alpha + 127) / 255;
-  const uint32_t g = (((dst >> 5) & 0x3F) * keep + ((color >> 5) & 0x3F) * alpha + 127) / 255;
-  const uint32_t b = ((dst & 0x1F) * keep + (color & 0x1F) * alpha + 127) / 255;
-  return static_cast<uint16_t>((r << 11) | (g << 5) | b);
-}
-
 /**
  * Anti-aliased line of half-width half_w, flat-ended, written straight into the canvas.
  * drawWideLine tests every pixel in a box around the line and reads each one it touches
  * back through LovyanGFX (~1.4 ms for a speed vector). This walks the major axis and, at
  * each step, fills the span across the line: covered pixels solid, the edges blended by
- * how much of them the span covers.
+ * how much of them the span covers. The ends take fractional coordinates too, so a moving
+ * vector slides instead of stepping a pixel at a time.
  */
-void drawThickLine(int x0, int y0, int x1, int y1, float half_w, uint16_t color) {
+void drawThickLine(float x0, float y0, float x1, float y1, float half_w, uint16_t color) {
   uint16_t* fb = static_cast<uint16_t*>(canvas.getBuffer());
   if (fb == nullptr) {
     canvas.drawWideLine(x0, y0, x1, y1, half_w, color);
     return;
   }
-  const bool steep = std::abs(y1 - y0) > std::abs(x1 - x0);
+  const bool steep = fabsf(y1 - y0) > fabsf(x1 - x0);
   // u runs along the major axis, v across it.
-  int u0 = steep ? y0 : x0;
-  int v0 = steep ? x0 : y0;
-  int u1 = steep ? y1 : x1;
-  int v1 = steep ? x1 : y1;
+  float u0 = steep ? y0 : x0;
+  float v0 = steep ? x0 : y0;
+  float u1 = steep ? y1 : x1;
+  float v1 = steep ? x1 : y1;
   if (u0 > u1) {
     std::swap(u0, u1);
     std::swap(v0, v1);
   }
-  const int du = u1 - u0;
-  const int dv = v1 - v0;
-  if (du == 0) {  // a single point
+  const float du = u1 - u0;
+  const float dv = v1 - v0;
+  if (du < 0.01f) {  // a single point
     return;
   }
-  const float slope = static_cast<float>(dv) / du;
+  const float slope = dv / du;
   // Measured along v, the line is wider than half_w by 1 / cos of its angle to u.
-  const float half_span = half_w * sqrtf(static_cast<float>(du * du + dv * dv)) / du;
+  const float half_span = half_w * sqrtf(du * du + dv * dv) / du;
 
-  for (int u = u0; u <= u1; ++u) {
-    const float vc = v0 + slope * static_cast<float>(u - u0);
+  // Pixel u covers [u - 0.5, u + 0.5]; the end pixels count only the part inside [u0, u1].
+  const int u_first = static_cast<int>(floorf(u0 + 0.5f));
+  const int u_last = static_cast<int>(ceilf(u1 - 0.5f));
+  for (int u = u_first; u <= u_last; ++u) {
+    const float along = std::min(u1, u + 0.5f) - std::max(u0, u - 0.5f);
+    if (along <= 0.004f) {
+      continue;
+    }
+    const float vc = v0 + slope * (static_cast<float>(u) - u0);
     const float lo = vc - half_span;
     const float hi = vc + half_span;
     // Pixel v covers [v - 0.5, v + 0.5].
     const int v_first = static_cast<int>(floorf(lo + 0.5f));
     const int v_last = static_cast<int>(ceilf(hi - 0.5f));
     for (int v = v_first; v <= v_last; ++v) {
-      const float cover = std::min(hi, v + 0.5f) - std::max(lo, v - 0.5f);
+      const float cover =
+          std::min(along, 1.0f) * (std::min(hi, v + 0.5f) - std::max(lo, v - 0.5f));
       if (cover <= 0.004f) {
         continue;
       }
@@ -278,8 +267,12 @@ bool isInsideOuterRing(int x, int y) {
   return distSqFromCenter(x, y) <= max_r * max_r;
 }
 
-/** Rim marker from true bearing; always on screen edge (even if target is 50+ km away). */
-bool beyondRingMarkerFromKm(float dx_km, float dy_km, float dist_km, int* out_x, int* out_y) {
+/**
+ * Rim marker from true bearing; always on screen edge (even if target is 50+ km away).
+ * Unrounded, so a marker sliding round the rim doesn't step.
+ */
+bool beyondRingMarkerFromKm(float dx_km, float dy_km, float dist_km, float* out_x,
+                            float* out_y) {
   if (dist_km < 0.01f) {
     return false;
   }
@@ -287,50 +280,51 @@ bool beyondRingMarkerFromKm(float dx_km, float dy_km, float dist_km, int* out_x,
     return false;
   }
 
-  const int cx = radar::kCenterX;
-  const int cy = radar::kCenterY;
   // Inset by the marker radius too, so the whole marker stays inside the round screen.
-  const int rim_r = radar::kCenterX - radar::kBeyondRingScreenMarginPx -
-                    radar::kBeyondRingMarkerRadiusPx;
+  const float rim_r = static_cast<float>(radar::kCenterX - radar::kBeyondRingScreenMarginPx -
+                                         radar::kBeyondRingMarkerRadiusPx);
   const float angle_rad = atan2f(dx_km, dy_km);
 
-  *out_x = cx + static_cast<int>(lroundf(sinf(angle_rad) * rim_r));
-  *out_y = cy - static_cast<int>(lroundf(cosf(angle_rad) * rim_r));
+  *out_x = radar::kCenterX + sinf(angle_rad) * rim_r;
+  *out_y = radar::kCenterY - cosf(angle_rad) * rim_r;
   return true;
 }
 
 /** Notched arrow centred on (x, y), pointing along track_deg; a dot if there's no track to show. */
-void drawBeyondRingMarker(int x, int y, float track_deg, bool show_arrow, uint16_t color) {
+void drawBeyondRingMarker(float x, float y, float track_deg, bool show_arrow, uint16_t color) {
   if (show_arrow) {
     radar::drawRimArrow(x, y, track_deg, color);
   } else {
-    canvas.fillSmoothCircle(x, y, radar::kBeyondRingDotRadiusPx, color);
+    radar::drawRimDot(x, y, color);
   }
 }
 
 /** Screen length of the distance flown in the current range's track_horizon_s. */
-int speedLineLengthPx(float gs_knots) {
+float speedLineLengthPx(float gs_knots) {
   if (gs_knots <= 0.0f) {
-    return 0;
+    return 0.0f;
   }
   const radar::RangePreset& range = radar::rangeCurrent();
-  const float px = gs_knots * kKmPerKnotSecond * range.track_horizon_s *
-                   radar::kGridOuterRadius / range.outer_km;
-  return static_cast<int>(px + 0.5f);
+  return gs_knots * kKmPerKnotSecond * range.track_horizon_s * radar::kGridOuterRadius /
+         range.outer_km;
 }
 
-/** End of the speed vector, clipped to the outer ring; false if there's nothing to draw. */
-bool speedVectorEnd(int cx, int cy, float track_deg, float gs_knots, int* ex, int* ey) {
-  const int len = speedLineLengthPx(gs_knots);
-  if (len <= 0) {
+/**
+ * End of the speed vector from (cx, cy), clipped to the outer ring; false if there's nothing
+ * to draw. Unrounded, like the icon it starts from.
+ */
+bool speedVectorEnd(float cx, float cy, float track_deg, float gs_knots, float* ex,
+                    float* ey) {
+  const float len = speedLineLengthPx(gs_knots);
+  if (len < 0.5f) {
     return false;
   }
 
   const float rad = track_deg * kDegToRad;
-  *ex = cx + static_cast<int>(lroundf(sinf(rad) * len));
-  *ey = cy - static_cast<int>(lroundf(cosf(rad) * len));
-  clipPointToOuterRing(cx, cy, ex, ey);
-  return *ex != cx || *ey != cy;
+  *ex = cx + sinf(rad) * len;
+  *ey = cy - cosf(rad) * len;
+  radar::clipPointToOuterRingF(cx, cy, ex, ey);
+  return fabsf(*ex - cx) >= 0.5f || fabsf(*ey - cy) >= 0.5f;
 }
 
 void applyTagStyle() {
@@ -531,7 +525,9 @@ void takeSnapshot() {
 
 struct AircraftDrawItem {
   size_t index = 0;
-  int x = 0;
+  float fx = 0.0f;  // unrounded, for drawing
+  float fy = 0.0f;
+  int x = 0;  // rounded, for the tag layout
   int y = 0;
   int dist_sq = 0;
   float track_deg = 0.0f;  // smoothed, see shownTrackDeg()
@@ -540,7 +536,9 @@ struct AircraftDrawItem {
 };
 
 struct BeyondRingDrawItem {
-  int x = 0;
+  float fx = 0.0f;  // unrounded, for drawing
+  float fy = 0.0f;
+  int x = 0;  // rounded, for the tag layout
   int y = 0;
   int dist_sq = 0;
   float track_deg = 0.0f;
@@ -593,10 +591,14 @@ void drawAircraft() {
     const float shown_track = shownTrackDeg(planes[i], now_ms);
 
     if (isInsideOuterRingKm(dist_km)) {
-      int x = 0;
-      int y = 0;
-      kmOffsetToScreen(dx_km, dy_km, &x, &y);
+      float fx = 0.0f;
+      float fy = 0.0f;
+      kmOffsetToScreenF(dx_km, dy_km, &fx, &fy);
+      const int x = static_cast<int>(lroundf(fx));
+      const int y = static_cast<int>(lroundf(fy));
       items[draw_count].index = i;
+      items[draw_count].fx = fx;
+      items[draw_count].fy = fy;
       items[draw_count].x = x;
       items[draw_count].y = y;
       items[draw_count].dist_sq = distSqFromCenter(x, y);
@@ -609,11 +611,15 @@ void drawAircraft() {
       continue;
     }
 
-    int rim_x = 0;
-    int rim_y = 0;
-    if (!beyondRingMarkerFromKm(dx_km, dy_km, dist_km, &rim_x, &rim_y)) {
+    float rim_fx = 0.0f;
+    float rim_fy = 0.0f;
+    if (!beyondRingMarkerFromKm(dx_km, dy_km, dist_km, &rim_fx, &rim_fy)) {
       continue;
     }
+    const int rim_x = static_cast<int>(lroundf(rim_fx));
+    const int rim_y = static_cast<int>(lroundf(rim_fy));
+    rim[rim_count].fx = rim_fx;
+    rim[rim_count].fy = rim_fy;
     rim[rim_count].x = rim_x;
     rim[rim_count].y = rim_y;
     rim[rim_count].dist_sq = distSqFromCenter(rim_x, rim_y);
@@ -630,7 +636,7 @@ void drawAircraft() {
   {
   PhaseScope timer(Phase::Rim);
   for (size_t d = 0; d < rim_count; ++d) {
-    drawBeyondRingMarker(rim[d].x, rim[d].y, rim[d].track_deg, rim[d].show_arrow,
+    drawBeyondRingMarker(rim[d].fx, rim[d].fy, rim[d].track_deg, rim[d].show_arrow,
                          rim[d].color);
     tags::addCircle(rim[d].x, rim[d].y, radar::kBeyondRingMarkerRadiusPx);
   }
@@ -642,17 +648,20 @@ void drawAircraft() {
     const size_t i = items[d].index;
     const int x = items[d].x;
     const int y = items[d].y;
-    int ex = 0;
-    int ey = 0;
+    const float fx = items[d].fx;
+    const float fy = items[d].fy;
+    float ex = 0.0f;
+    float ey = 0.0f;
     // Drawn before the icon, so the part under it is hidden.
     if (planes[i].has_track &&
-        speedVectorEnd(x, y, items[d].track_deg, planes[i].gs_knots, &ex, &ey)) {
+        speedVectorEnd(fx, fy, items[d].track_deg, planes[i].gs_knots, &ex, &ey)) {
       PhaseScope timer(Phase::Vectors);
-      drawThickLine(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth, items[d].colors.track);
-      tags::addSegment(x, y, ex, ey, radar::kAircraftTrackLineHalfWidth);
+      drawThickLine(fx, fy, ex, ey, radar::kAircraftTrackLineHalfWidth, items[d].colors.track);
+      tags::addSegment(x, y, static_cast<int>(lroundf(ex)), static_cast<int>(lroundf(ey)),
+                       radar::kAircraftTrackLineHalfWidth);
     }
     PhaseScope timer(Phase::Icons);
-    radar::drawAircraftIcon(x, y, iconBearing(planes[i], items[d].track_deg), items[d].shape,
+    radar::drawAircraftIcon(fx, fy, iconBearing(planes[i], items[d].track_deg), items[d].shape,
                             items[d].colors.icon);
     tags::addCircle(x, y, radar::iconRadiusPx(items[d].shape), static_cast<int>(d));
   }

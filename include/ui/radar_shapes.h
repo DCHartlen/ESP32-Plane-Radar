@@ -18,11 +18,17 @@ IconShape iconShapeFor(const services::adsb::Aircraft& plane);
 /** Screen radius (px) that covers the icon at any rotation; see the kIconRadius* constants. */
 int iconRadiusPx(IconShape shape);
 
-/** Filled icon centred on (x, y), rotated to bearing_deg (0 = north, clockwise). Balloons don't rotate. */
-void drawAircraftIcon(int x, int y, float bearing_deg, IconShape shape, uint16_t color);
+/**
+ * Filled, anti-aliased icon centred on (x, y), rotated to bearing_deg (0 = north,
+ * clockwise). x and y may be fractional, so slow movement doesn't step. Balloons don't rotate.
+ */
+void drawAircraftIcon(float x, float y, float bearing_deg, IconShape shape, uint16_t color);
 
 /** Notched arrow for beyond-ring traffic, centred on (x, y), pointing along bearing_deg. */
-void drawRimArrow(int x, int y, float bearing_deg, uint16_t color);
+void drawRimArrow(float x, float y, float bearing_deg, uint16_t color);
+
+/** Dot for beyond-ring traffic with no track, kBeyondRingDotRadiusPx, centred on (x, y). */
+void drawRimDot(float x, float y, uint16_t color);
 
 /** Up (climbing) or down triangle centred on (x, y), kClimbArrowWidthPx wide. */
 void drawClimbArrow(int x, int y, bool climbing, uint16_t color);
