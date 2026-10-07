@@ -24,11 +24,18 @@ constexpr size_t kMaxCircles = kMaxAircraft * 2 + 4;
 constexpr size_t kMaxSegments = kMaxAircraft;
 /** Forget an aircraft's slot after this many frames without seeing it. */
 constexpr uint32_t kForgetAfterFrames = 3;
+/**
+ * A tag stays where it was until its icon has moved more than this far (physical px, either
+ * axis) from the remembered anchor. Not a design size, so not scaled with px().
+ */
+constexpr float kTagHoldPx = 1.0f;
 
 /** Slot costs; the cheapest slot that fits wins. */
 constexpr int kOrderStepCost = 10;     // per step down the preference order
 constexpr int kVectorSideCost = 60;    // slot straight along the track; scaled by the cosine
 constexpr int kKeepSlotBonus = 100;    // last frame's slot
+/** A better slot must win this many frames in a row (at 4 Hz, ~1 s) before the tag moves. */
+constexpr uint8_t kSwitchAfterFrames = 4;
 constexpr int kSoftOverlapCost = 200;  // covering an airport label at all...
 constexpr int kSoftOverlapAreaDiv = 64;  // ...plus 1 per this many px² covered
 
@@ -55,6 +62,11 @@ struct Segment {
 struct Memory {
   char hex[7];
   Slot slot;
+  int anchor_x;  // icon centre the tag was placed around
+  int anchor_y;
+  Slot pending_slot;       // a better slot the tag isn't in yet...
+  uint8_t pending_frames;  // ...and how many frames in a row it has won
+  bool full;
   uint32_t last_frame;
 };
 
@@ -225,7 +237,8 @@ Memory* findMemory(const char* hex) {
   return nullptr;
 }
 
-void remember(const char* hex, Memory* existing, Slot slot) {
+void remember(const char* hex, Memory* existing, Slot slot, int anchor_x, int anchor_y,
+              bool full) {
   Memory* m = existing;
   if (m == nullptr) {
     if (hex == nullptr || hex[0] == '\0') {
@@ -244,8 +257,12 @@ void remember(const char* hex, Memory* existing, Slot slot) {
     }
     strncpy(m->hex, hex, sizeof(m->hex) - 1);
     m->hex[sizeof(m->hex) - 1] = '\0';
+    m->pending_frames = 0;
   }
   m->slot = slot;
+  m->anchor_x = anchor_x;
+  m->anchor_y = anchor_y;
+  m->full = full;
   m->last_frame = s_frame;
 }
 
@@ -263,6 +280,14 @@ Align slotAlign(Slot slot) {
     default:
       return Align::Left;
   }
+}
+
+bool wasFull(const char* hex) {
+  if (s_store == nullptr) {
+    return false;
+  }
+  const Memory* m = findMemory(hex);
+  return m != nullptr && m->full;
 }
 
 void beginFrame() {
@@ -312,11 +337,18 @@ void addSoftRect(const ScreenRect& rect) {
   }
 }
 
-bool place(const TagRequest& req, ScreenRect* out, Slot* slot) {
+bool place(const TagRequest& request, ScreenRect* out, Slot* slot) {
   if (s_store == nullptr) {
     return false;
   }
-  Memory* memory = findMemory(req.hex);
+  Memory* memory = findMemory(request.hex);
+  // Hold last frame's anchor while the icon is within kTagHoldPx of it.
+  TagRequest req = request;
+  if (memory != nullptr && fabsf(req.fx - memory->anchor_x) <= kTagHoldPx &&
+      fabsf(req.fy - memory->anchor_y) <= kTagHoldPx) {
+    req.x = memory->anchor_x;
+    req.y = memory->anchor_y;
+  }
   // The preferred side faces the centre.
   const bool mirror = req.x >= radar::kCenterX;
 
@@ -331,6 +363,8 @@ bool place(const TagRequest& req, ScreenRect* out, Slot* slot) {
   int best_cost = INT_MAX;
   Slot best_slot = Slot::Right;
   ScreenRect best_rect{};
+  bool kept_fits = false;  // last frame's slot is still free
+  ScreenRect kept_rect{};
   for (int rank = 0; rank < kSlotCount; ++rank) {
     const Slot candidate = mirror ? mirrored(kOrder[rank]) : kOrder[rank];
     const ScreenRect rect = slotRect(req, candidate);
@@ -350,6 +384,8 @@ bool place(const TagRequest& req, ScreenRect* out, Slot* slot) {
     }
     if (memory != nullptr && memory->slot == candidate) {
       cost -= kKeepSlotBonus;
+      kept_fits = true;
+      kept_rect = rect;
     }
     if (cost < best_cost) {
       best_cost = cost;
@@ -361,8 +397,28 @@ bool place(const TagRequest& req, ScreenRect* out, Slot* slot) {
   if (best_cost == INT_MAX) {
     return false;
   }
+  // Stay in a slot that still fits until the same better slot has won kSwitchAfterFrames in
+  // a row. A blocked slot is left at once.
+  if (memory != nullptr) {
+    if (kept_fits && best_slot != memory->slot) {
+      if (memory->pending_frames > 0 && memory->pending_slot == best_slot) {
+        ++memory->pending_frames;
+      } else {
+        memory->pending_slot = best_slot;
+        memory->pending_frames = 1;
+      }
+      if (memory->pending_frames < kSwitchAfterFrames) {
+        best_slot = memory->slot;
+        best_rect = kept_rect;
+      } else {
+        memory->pending_frames = 0;
+      }
+    } else {
+      memory->pending_frames = 0;
+    }
+  }
   addRect(best_rect);
-  remember(req.hex, memory, best_slot);
+  remember(req.hex, memory, best_slot, req.x, req.y, req.full);
   *out = best_rect;
   *slot = best_slot;
   return true;

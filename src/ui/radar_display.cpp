@@ -416,6 +416,18 @@ void drawTag(const TagText& text, uint8_t lines, const tags::ScreenRect& box, ta
   }
 }
 
+/** How many lines tagText() gives the aircraft. */
+uint8_t tagLineCount(const services::adsb::Aircraft& plane) {
+  return static_cast<uint8_t>((plane.callsign[0] != '\0') + (plane.type[0] != '\0') +
+                              (plane.alt[0] != '\0'));
+}
+
+/**
+ * An aircraft that had a full tag keeps it while it is at most this many places past the
+ * max_full_tags nearest, so tags don't grow and shrink as aircraft pass each other.
+ */
+constexpr size_t kFullTagKeepRanks = 2;
+
 /** Tag outcomes of the last frame, for the serial log. */
 struct TagStats {
   uint8_t full;
@@ -666,12 +678,35 @@ void drawAircraft() {
     tags::addCircle(x, y, radar::iconRadiusPx(items[d].shape), static_cast<int>(d));
   }
 
-  // Tags nearest-first, so the aircraft that matter most get the best slots. The nearest
-  // max_full_tags get every line; the rest, or any that don't fit, try the first line alone.
+  // Which aircraft get full tags, decided before placing so the choice doesn't depend on
+  // what fits: first last frame's full tags still within kFullTagKeepRanks of the cutoff,
+  // then the nearest others up to max_full_tags. items[] is far-first, so the nearest-first
+  // rank r is items[draw_count - 1 - r].
   const int64_t tag_place_start = esp_timer_get_time();
+  const uint8_t max_full = radar::rangeCurrent().max_full_tags;
+  bool want_full[services::adsb::kMaxAircraft] = {};
+  size_t full_count = 0;
+  const size_t keep_ranks = std::min(draw_count, max_full + kFullTagKeepRanks);
+  for (size_t r = 0; r < keep_ranks && full_count < max_full; ++r) {
+    const size_t d = draw_count - 1 - r;
+    const services::adsb::Aircraft& plane = planes[items[d].index];
+    if (tagLineCount(plane) > 1 && tags::wasFull(plane.hex)) {
+      want_full[d] = true;
+      ++full_count;
+    }
+  }
+  for (size_t r = 0; r < draw_count && full_count < max_full; ++r) {
+    const size_t d = draw_count - 1 - r;
+    if (!want_full[d] && tagLineCount(planes[items[d].index]) > 1) {
+      want_full[d] = true;
+      ++full_count;
+    }
+  }
+
+  // Tags nearest-first, so the aircraft that matter most get the best slots. A full tag that
+  // doesn't fit tries the first line alone; its place in the full set isn't passed on.
   applyTagStyle();
   const int line_h = canvas.fontHeight();
-  const uint8_t max_full = radar::rangeCurrent().max_full_tags;
   s_tag_stats = {};
   for (size_t d = draw_count; d-- > 0;) {
     const services::adsb::Aircraft& plane = planes[items[d].index];
@@ -685,13 +720,16 @@ void drawAircraft() {
     req.owner = static_cast<int>(d);
     req.x = items[d].x;
     req.y = items[d].y;
+    req.fx = items[d].fx;
+    req.fy = items[d].fy;
     req.icon_radius = radar::iconRadiusPx(items[d].shape);
     req.moving = plane.has_track && plane.gs_knots > 0.0f;
     req.track_deg = items[d].track_deg;
+    req.full = want_full[d];
 
     tags::ScreenRect box{};
     tags::Slot slot = tags::Slot::Right;
-    uint8_t lines = s_tag_stats.full < max_full ? text.count : 1;
+    uint8_t lines = want_full[d] ? text.count : 1;
     req.w = tagWidth(text, lines);
     req.h = line_h * lines;
     bool placed = tags::place(req, &box, &slot);
