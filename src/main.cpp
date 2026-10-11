@@ -20,6 +20,7 @@
 #include "services/clock.h"
 #include "services/radar_location.h"
 #include "services/wifi_setup.h"
+#include "spike/weather_spike.h"
 #include "ui/radar_display.h"
 #include "ui/radar_range.h"
 #include "ui/status_screens.h"
@@ -236,6 +237,9 @@ void setup() {
   services::location::init();
   ui::radar::rangeInit();
   services::clock::init();
+#ifdef WEATHER_SPIKE
+  weatherSpikeRun();
+#endif
   // Fetches on core 0 from here on, once loop() enables it (Wi-Fi up).
   services::adsb::startFetchTask();
 
