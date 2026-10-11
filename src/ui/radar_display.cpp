@@ -16,6 +16,7 @@
 #include "ui/radar_geometry.h"
 #include "services/clock.h"
 #include "ui/canvas_pixels.h"
+#include "ui/landmark_overlay.h"
 #include "ui/radar_range.h"
 #include "ui/radar_shapes.h"
 #include "ui/radar_theme.h"
@@ -50,6 +51,7 @@ constexpr float kDegToRad = 0.01745329252f;
 /** Parts of a frame, timed separately for the serial log (phase D1 profiling). */
 enum class Phase : uint8_t {
   Clear,
+  Landmarks,
   Rings,
   Crosshairs,
   Runways,
@@ -70,7 +72,7 @@ enum class Phase : uint8_t {
 };
 
 constexpr const char* kPhaseNames[] = {
-    "clear",    "rings", "cross",   "runways", "home",      "cardinal",
+    "clear",    "landmarks", "rings", "cross",   "runways", "home",      "cardinal",
     "scale",    "clk_layout", "obst", "classify", "rim",    "vectors",
     "icons",    "tag_place",  "tag_draw", "problem", "clock",
 };
@@ -1276,6 +1278,10 @@ void drawStaticGrid() {
   {
     PhaseScope timer(Phase::Clear);
     clearCanvas(radar::kColorBackground);
+  }
+  {
+    PhaseScope timer(Phase::Landmarks);
+    landmark::drawLandmarks(canvas);
   }
   {
     PhaseScope timer(Phase::Rings);
