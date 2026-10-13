@@ -25,6 +25,11 @@ constexpr int kH = config::kDisplayHeight;
 constexpr int kAlignPx = 16;
 constexpr float kKmPerDeg = 111.0f;
 constexpr float kDegToRad = 3.14159265f / 180.0f;
+/**
+ * Points closer than this to the last drawn one are skipped, so zoomed-out ranges don't
+ * pay for detail they can't show (OSM shores have a point every few metres).
+ */
+constexpr float kMinSegmentPx = 1.5f;
 
 /** What the layer was drawn for; any change redraws it. */
 struct LayerKey {
@@ -201,7 +206,7 @@ bool anyChunkInView(const ViewBox& view) {
   return false;
 }
 
-/** Draws the chunk's segments; *end_lat / *end_lon get its last point. */
+/** Draws the chunk's segments, merging sub-pixel ones; *end_lat / *end_lon get its last point. */
 void drawChunk(const data::landmarks::Chunk& chunk, const LineStyle& style, float* phase,
                int32_t* end_lat, int32_t* end_lon) {
   constexpr float kDegPerUnit = 1.0f / data::landmarks::kUnitsPerDeg;
@@ -225,6 +230,10 @@ void drawChunk(const data::landmarks::Chunk& chunk, const LineStyle& style, floa
     float x1 = 0.0f;
     float y1 = 0.0f;
     project(lat, lon, &x1, &y1);
+    const bool last = i + 1 == chunk.point_count;
+    if (!last && fabsf(x1 - x0) < kMinSegmentPx && fabsf(y1 - y0) < kMinSegmentPx) {
+      continue;
+    }
     if (style.dashed) {
       drawDashed(x0, y0, x1, y1, style, phase);
     } else {
