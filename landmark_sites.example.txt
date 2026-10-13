@@ -1,0 +1,8 @@
+# Sites to bake landmark lines (shores, rivers, border) around. Copy this file to
+# landmark_sites.txt, which git ignores, and run: python3 scripts/build_landmarks.py
+# The generated src/data/landmarks_local.inc is git-ignored too, since it shows where the
+# sites are. Without it the firmware builds with no landmarks.
+#
+# One site per line: name, lat, lon[, radius_km]. The radius defaults to 50 km; the widest
+# range preset's outer ring is about 33 km. The name is only for you.
+Niagara Falls, 43.0896, -79.0849

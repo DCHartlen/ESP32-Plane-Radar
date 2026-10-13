@@ -166,11 +166,39 @@ void drawDashed(float x0, float y0, float x1, float y1, const LineStyle& style,
   }
 }
 
-/** True if the chunk's box overlaps the box (1e-5 degree units) the outer ring covers. */
-bool chunkInView(const data::landmarks::Chunk& chunk, int32_t min_lat, int32_t max_lat,
-                 int32_t min_lon, int32_t max_lon) {
-  return chunk.max_lat >= min_lat && chunk.min_lat <= max_lat && chunk.max_lon >= min_lon &&
-         chunk.min_lon <= max_lon;
+/** The box the outer ring covers, in dataset units (1e-5 degree). */
+struct ViewBox {
+  int32_t min_lat;
+  int32_t max_lat;
+  int32_t min_lon;
+  int32_t max_lon;
+};
+
+ViewBox currentViewBox() {
+  const double lat = services::location::lat();
+  const double lon = services::location::lon();
+  const float outer_km = radar::rangeCurrent().outer_km;
+  const float dlat_deg = outer_km / kKmPerDeg;
+  const float dlon_deg = outer_km / (kKmPerDeg * cosf(static_cast<float>(lat) * kDegToRad));
+  const auto units = [](double deg) {
+    return static_cast<int32_t>(lround(deg * data::landmarks::kUnitsPerDeg));
+  };
+  return {units(lat - dlat_deg), units(lat + dlat_deg), units(lon - dlon_deg),
+          units(lon + dlon_deg)};
+}
+
+bool chunkInView(const data::landmarks::Chunk& chunk, const ViewBox& view) {
+  return chunk.max_lat >= view.min_lat && chunk.min_lat <= view.max_lat &&
+         chunk.max_lon >= view.min_lon && chunk.min_lon <= view.max_lon;
+}
+
+bool anyChunkInView(const ViewBox& view) {
+  for (size_t i = 0; i < data::landmarks::kChunkCount; ++i) {
+    if (chunkInView(data::landmarks::kChunks[i], view)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Draws the chunk's segments; *end_lat / *end_lon get its last point. */
@@ -234,23 +262,9 @@ void findRowSpans(uint16_t background) {
   }
 }
 
-void redrawLayer() {
+void redrawLayer(const ViewBox& view) {
   const unsigned long t0 = millis();
   s_layer.fillScreen(radar::kColorBackground);
-
-  // The box the outer ring covers, in dataset units, to skip chunks off screen.
-  const double lat = services::location::lat();
-  const double lon = services::location::lon();
-  const float outer_km = radar::rangeCurrent().outer_km;
-  const float dlat_deg = outer_km / kKmPerDeg;
-  const float dlon_deg = outer_km / (kKmPerDeg * cosf(static_cast<float>(lat) * kDegToRad));
-  const auto units = [](double deg) {
-    return static_cast<int32_t>(lround(deg * data::landmarks::kUnitsPerDeg));
-  };
-  const int32_t min_lat = units(lat - dlat_deg);
-  const int32_t max_lat = units(lat + dlat_deg);
-  const int32_t min_lon = units(lon - dlon_deg);
-  const int32_t max_lon = units(lon + dlon_deg);
 
   size_t drawn = 0;
   float phase = 0.0f;
@@ -259,7 +273,7 @@ void redrawLayer() {
   // Chunks are sorted by kind, which is also the drawing order.
   for (size_t i = 0; i < data::landmarks::kChunkCount; ++i) {
     const data::landmarks::Chunk& chunk = data::landmarks::kChunks[i];
-    if (!chunkInView(chunk, min_lat, max_lat, min_lon, max_lon)) {
+    if (!chunkInView(chunk, view)) {
       prev_end_lat = INT32_MIN;
       continue;
     }
@@ -276,15 +290,6 @@ void redrawLayer() {
                 millis() - t0);
 }
 
-bool locationInRegion(double lat, double lon) {
-  // Margin of the widest fetch radius, so lines just inside the region still show.
-  constexpr double kMarginDeg = 1.0;
-  return lat >= data::landmarks::kRegionSouth - kMarginDeg &&
-         lat <= data::landmarks::kRegionNorth + kMarginDeg &&
-         lon >= data::landmarks::kRegionWest - kMarginDeg &&
-         lon <= data::landmarks::kRegionEast + kMarginDeg;
-}
-
 }  // namespace
 
 void drawLandmarks(LGFX_Sprite& frame) {
@@ -293,11 +298,14 @@ void drawLandmarks(LGFX_Sprite& frame) {
   }
   const LayerKey key{radar::rangeIndex(), services::location::lat(),
                      services::location::lon()};
-  if (!locationInRegion(key.lat, key.lon) || !allocateLayer(frame)) {
-    return;
-  }
   if (!s_layer_valid || !(key == s_key)) {
-    redrawLayer();
+    // With nothing in view (no generated data, or far from every site), skip the layer
+    // and its 1 MB of PSRAM.
+    const ViewBox view = currentViewBox();
+    s_any_rows = false;
+    if (anyChunkInView(view) && allocateLayer(frame)) {
+      redrawLayer(view);
+    }
     s_key = key;
     s_layer_valid = true;
   }

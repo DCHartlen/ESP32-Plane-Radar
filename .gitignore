@@ -5,3 +5,7 @@ release/
 .vscode/launch.json
 .vscode/ipch
 logs/*
+# Landmark sites and the data generated from them (they show where the sites are).
+landmark_sites.txt
+src/data/landmarks_local.inc
+scripts/__pycache__/
