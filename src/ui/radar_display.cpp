@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <new>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -16,6 +17,7 @@
 #include "ui/radar_geometry.h"
 #include "services/clock.h"
 #include "ui/canvas_pixels.h"
+#include "ui/landmark_overlay.h"
 #include "ui/radar_range.h"
 #include "ui/radar_shapes.h"
 #include "ui/radar_theme.h"
@@ -49,6 +51,7 @@ constexpr float kDegToRad = 0.01745329252f;
 
 /** Parts of a frame, timed separately for the serial log (phase D1 profiling). */
 enum class Phase : uint8_t {
+  Landmarks,
   Clear,
   Rings,
   Crosshairs,
@@ -70,7 +73,7 @@ enum class Phase : uint8_t {
 };
 
 constexpr const char* kPhaseNames[] = {
-    "clear",    "rings", "cross",   "runways", "home",      "cardinal",
+    "landmarks", "clear",    "rings", "cross",   "runways", "home",      "cardinal",
     "scale",    "clk_layout", "obst", "classify", "rim",    "vectors",
     "icons",    "tag_place",  "tag_draw", "problem", "clock",
 };
@@ -582,12 +585,29 @@ void sortBeyondRingFarFirst(BeyondRingDrawItem* items, size_t count) {
   }
 }
 
+/**
+ * drawAircraft()'s per-frame lists. At ~4.3 KB they were over half of the 8 KB loop task
+ * stack, which overflowed (a panic) once deep drawing calls stacked on top. Kept in PSRAM.
+ */
+struct DrawLists {
+  AircraftDrawItem items[services::adsb::kMaxAircraft];
+  BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
+};
+DrawLists* s_draw_lists = nullptr;
+
 void drawAircraft() {
   const size_t n = s_snapshot.count;
   const services::adsb::Aircraft* planes = s_planes;
 
-  AircraftDrawItem items[services::adsb::kMaxAircraft];
-  BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
+  if (s_draw_lists == nullptr) {
+    void* mem = heap_caps_malloc(sizeof(DrawLists), MALLOC_CAP_SPIRAM);
+    if (mem == nullptr) {
+      return;
+    }
+    s_draw_lists = new (mem) DrawLists();
+  }
+  AircraftDrawItem* items = s_draw_lists->items;
+  BeyondRingDrawItem* rim = s_draw_lists->rim;
   size_t draw_count = 0;
   size_t rim_count = 0;
 
@@ -1239,9 +1259,13 @@ alignas(4) uint16_t s_clear_row[config::kDisplayWidth];
  * PSRAM, reading back as much as it writes (~100 ms). This copies an internal row instead,
  * and only the part of each row inside the round glass: the corners (~21% of the buffer)
  * are never seen, so whatever was drawn there can stay.
+ *
+ * Where a row has landmark lines, that span is copied from the landmark layer instead
+ * (background with the lines on it), so those pixels are written once rather than cleared
+ * and then overwritten.
  */
 void clearCanvas(uint16_t color) {
-  uint8_t* fb = static_cast<uint8_t*>(canvas.getBuffer());
+  uint16_t* fb = static_cast<uint16_t*>(canvas.getBuffer());
   if (fb == nullptr) {
     canvas.fillScreen(color);
     return;
@@ -1250,7 +1274,11 @@ void clearCanvas(uint16_t color) {
     std::fill(std::begin(s_clear_row), std::end(s_clear_row), color);
   }
   // The canvas is rgb565_nonswapped, so color565() values go in as they are.
-  constexpr size_t kRowBytes = sizeof(s_clear_row);
+  const auto fill = [](uint16_t* dst, int from, int to) {
+    if (to > from) {
+      memcpy(dst + from, s_clear_row, static_cast<size_t>(to - from) * sizeof(uint16_t));
+    }
+  };
   constexpr int kW = config::kDisplayWidth;
   constexpr float kRadius = kW * 0.5f;
   // Spans start and end on 16 px (one 32-byte cache line), which also leaves a few px of
@@ -1263,8 +1291,20 @@ void clearCanvas(uint16_t color) {
     const int half = half_sq > 0.0f ? static_cast<int>(ceilf(sqrtf(half_sq))) : 0;
     const int left = std::max(0, (kW / 2 - half) / kAlignPx * kAlignPx);
     const int right = kW - left;  // symmetric about the centre
-    memcpy(fb + static_cast<size_t>(y) * kRowBytes + left * sizeof(uint16_t), s_clear_row,
-           static_cast<size_t>(right - left) * sizeof(uint16_t));
+    uint16_t* row = fb + static_cast<size_t>(y) * kW;
+    int lines_left = 0;
+    int lines_right = 0;
+    const uint16_t* lines = landmark::landmarkRow(y, &lines_left, &lines_right);
+    if (lines == nullptr) {
+      fill(row, left, right);
+      continue;
+    }
+    lines_left = std::clamp(lines_left, left, right);
+    lines_right = std::clamp(lines_right, lines_left, right);
+    fill(row, left, lines_left);
+    memcpy(row + lines_left, lines + lines_left,
+           static_cast<size_t>(lines_right - lines_left) * sizeof(uint16_t));
+    fill(row, lines_right, right);
   }
 }
 
@@ -1273,6 +1313,11 @@ void drawStaticGrid() {
   const int cy = radar::kCenterY;
   const int grid_r = radar::kGridOuterRadius;
 
+  {
+    // Only does work after a zoom or a location change.
+    PhaseScope timer(Phase::Landmarks);
+    landmark::prepareLandmarks(canvas);
+  }
   {
     PhaseScope timer(Phase::Clear);
     clearCanvas(radar::kColorBackground);
