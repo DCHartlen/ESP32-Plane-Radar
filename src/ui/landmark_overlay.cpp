@@ -41,10 +41,13 @@ struct LayerKey {
   }
 };
 
-/** Columns [left, right) of a buffer row that hold landmark pixels; left == right if none. */
+/**
+ * Columns [left, right) of a buffer row that may hold landmark pixels; empty if left >= right.
+ * Outside its span every row of the layer is background.
+ */
 struct RowSpan {
-  uint16_t left;
-  uint16_t right;
+  int16_t left;
+  int16_t right;
 };
 
 LGFX_Sprite s_layer;
@@ -52,7 +55,8 @@ bool s_alloc_failed = false;
 bool s_layer_valid = false;
 LayerKey s_key{};
 RowSpan s_spans[kH];
-bool s_any_rows = false;
+/** The layer holds lines for s_key; false while nothing is in view. */
+bool s_has_lines = false;
 
 struct LineStyle {
   float half_width;
@@ -94,7 +98,58 @@ bool allocateLayer(LGFX_Sprite& frame) {
   }
   // Same rotation as the frame, so buffer rows line up for the copy.
   s_layer.setRotation(frame.getRotation());
+  s_layer.fillScreen(radar::kColorBackground);
+  for (RowSpan& span : s_spans) {
+    span = {kW, 0};
+  }
   return true;
+}
+
+/** Widens a buffer row's span to cover screen columns [x_left, x_right] on screen row y. */
+void markScreenRow(int y, float x_left, float x_right) {
+  if (y < 0 || y >= kH) {
+    return;
+  }
+  int left = std::max(0, static_cast<int>(floorf(x_left)));
+  int right = std::min(kW, static_cast<int>(ceilf(x_right)) + 1);
+  if (left >= right) {
+    return;
+  }
+  int row = y;
+  if (config::kDisplayRotate180) {
+    // Rotation 2 turns the buffer 180 degrees (see canvas_pixels.h).
+    row = kH - 1 - y;
+    const int mirrored_left = kW - right;
+    right = kW - left;
+    left = mirrored_left;
+  }
+  RowSpan& span = s_spans[row];
+  span.left = static_cast<int16_t>(std::min<int>(span.left, left));
+  span.right = static_cast<int16_t>(std::max<int>(span.right, right));
+}
+
+/**
+ * Marks the rows a drawWideLine of half-width hw covers. For each row it takes the part of
+ * the segment within the pen's reach of that row, so a long diagonal doesn't mark its whole
+ * bounding box.
+ */
+void markSegment(float x0, float y0, float x1, float y1, float hw) {
+  const float pad = hw + 1.5f;  // the pen, its anti-aliased edge, and rounding
+  const float dx = x1 - x0;
+  const float dy = y1 - y0;
+  const int top = static_cast<int>(floorf(std::min(y0, y1) - pad));
+  const int bottom = static_cast<int>(ceilf(std::max(y0, y1) + pad));
+  for (int y = std::max(0, top); y <= std::min(kH - 1, bottom); ++y) {
+    float xa = x0;
+    float xb = x1;
+    if (fabsf(dy) > 1e-3f) {
+      const float t0 = std::clamp((y - pad - y0) / dy, 0.0f, 1.0f);
+      const float t1 = std::clamp((y + pad - y0) / dy, 0.0f, 1.0f);
+      xa = x0 + dx * t0;
+      xb = x0 + dx * t1;
+    }
+    markScreenRow(y, std::min(xa, xb) - pad, std::max(xa, xb) + pad);
+  }
 }
 
 /**
@@ -135,6 +190,7 @@ bool clipToOuterRing(float* x0, float* y0, float* x1, float* y1) {
 void drawClipped(float x0, float y0, float x1, float y1, const LineStyle& style) {
   if (clipToOuterRing(&x0, &y0, &x1, &y1)) {
     s_layer.drawWideLine(x0, y0, x1, y1, style.half_width, style.color);
+    markSegment(x0, y0, x1, y1, style.half_width);
   }
 }
 
@@ -246,34 +302,36 @@ void drawChunk(const data::landmarks::Chunk& chunk, const LineStyle& style, floa
   *end_lon = lon;
 }
 
-/** Finds each buffer row's span of non-background pixels. */
-void findRowSpans(uint16_t background) {
-  const uint16_t* buf = static_cast<const uint16_t*>(s_layer.getBuffer());
-  s_any_rows = false;
+/** Paints the old spans back to background and empties them, so the layer is all background. */
+void clearSpans() {
+  uint16_t* buf = static_cast<uint16_t*>(s_layer.getBuffer());
   for (int y = 0; y < kH; ++y) {
-    const uint16_t* row = buf + static_cast<size_t>(y) * kW;
-    int left = 0;
-    while (left < kW && row[left] == background) {
-      ++left;
+    RowSpan& span = s_spans[y];
+    if (span.left < span.right) {
+      uint16_t* row = buf + static_cast<size_t>(y) * kW;
+      std::fill(row + span.left, row + span.right, radar::kColorBackground);
     }
-    if (left == kW) {
-      s_spans[y] = {0, 0};
-      continue;
-    }
-    int right = kW;
-    while (row[right - 1] == background) {
-      --right;
-    }
-    left = left / kAlignPx * kAlignPx;
-    right = std::min(kW, (right + kAlignPx - 1) / kAlignPx * kAlignPx);
-    s_spans[y] = {static_cast<uint16_t>(left), static_cast<uint16_t>(right)};
-    s_any_rows = true;
+    span = {kW, 0};
   }
+}
+
+/** Rounds the spans out to 16 px (one 32-byte cache line); true if any row has lines. */
+bool alignSpans() {
+  bool any = false;
+  for (RowSpan& span : s_spans) {
+    if (span.left < span.right) {
+      span.left = static_cast<int16_t>(span.left / kAlignPx * kAlignPx);
+      span.right = static_cast<int16_t>(
+          std::min(kW, (span.right + kAlignPx - 1) / kAlignPx * kAlignPx));
+      any = true;
+    }
+  }
+  return any;
 }
 
 void redrawLayer(const ViewBox& view) {
   const unsigned long t0 = millis();
-  s_layer.fillScreen(radar::kColorBackground);
+  clearSpans();
 
   size_t drawn = 0;
   float phase = 0.0f;
@@ -294,46 +352,44 @@ void redrawLayer(const ViewBox& view) {
     ++drawn;
   }
 
-  findRowSpans(radar::kColorBackground);
+  s_has_lines = alignSpans();
   Serial.printf("Landmarks: drew %u chunks in %lu ms\n", static_cast<unsigned>(drawn),
                 millis() - t0);
 }
 
 }  // namespace
 
-void drawLandmarks(LGFX_Sprite& frame) {
+void prepareLandmarks(LGFX_Sprite& frame) {
   if (!radar::showLandmarks()) {
     return;
   }
   const LayerKey key{radar::rangeIndex(), services::location::lat(),
                      services::location::lon()};
-  if (!s_layer_valid || !(key == s_key)) {
-    // With nothing in view (no generated data, or far from every site), skip the layer
-    // and its 1 MB of PSRAM.
-    const ViewBox view = currentViewBox();
-    s_any_rows = false;
-    if (anyChunkInView(view) && allocateLayer(frame)) {
-      redrawLayer(view);
-    }
-    s_key = key;
-    s_layer_valid = true;
-  }
-  if (!s_any_rows) {
+  if (s_layer_valid && key == s_key) {
     return;
   }
+  // With nothing in view (no generated data, or far from every site), skip the layer and
+  // its 1 MB of PSRAM.
+  const ViewBox view = currentViewBox();
+  s_has_lines = false;
+  if (anyChunkInView(view) && allocateLayer(frame)) {
+    redrawLayer(view);
+  }
+  s_key = key;
+  s_layer_valid = true;
+}
 
-  uint16_t* dst = static_cast<uint16_t*>(frame.getBuffer());
-  const uint16_t* src = static_cast<const uint16_t*>(s_layer.getBuffer());
-  if (dst == nullptr) {
-    return;
+const uint16_t* landmarkRow(int y, int* left, int* right) {
+  if (!s_has_lines || !radar::showLandmarks() || y < 0 || y >= kH) {
+    return nullptr;
   }
-  for (int y = 0; y < kH; ++y) {
-    const RowSpan span = s_spans[y];
-    if (span.right > span.left) {
-      const size_t offset = static_cast<size_t>(y) * kW + span.left;
-      memcpy(dst + offset, src + offset, (span.right - span.left) * sizeof(uint16_t));
-    }
+  const RowSpan span = s_spans[y];
+  if (span.left >= span.right) {
+    return nullptr;
   }
+  *left = span.left;
+  *right = span.right;
+  return static_cast<const uint16_t*>(s_layer.getBuffer()) + static_cast<size_t>(y) * kW;
 }
 
 }  // namespace ui::landmark
