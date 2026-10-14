@@ -64,12 +64,13 @@ constexpr int kRunwayLabelHeightPx = kCardinalLabelHeightPx;
 constexpr int kRunwayLabelGapPx = px(3);
 /**
  * Landmark lines (landmark_overlay.cpp): shores, islands, rivers and the international
- * border, drawn under the grid. Water is a dim slate so it can't pass for the teal runways
- * or the cyan cruise colour; the border is a dashed mauve, a hue the altitude scale skips.
+ * border, drawn under the grid. Water is a deep blue, darker than the cyan and ice-blue
+ * altitude colours and bluer than the teal runways; the border is a dashed mauve, a hue the
+ * altitude scale skips. Water lines are thinner than the grid stroke so the grid stays on top.
  */
-constexpr float kShoreLineHalfWidth = pxF(1.0f);
-constexpr float kIslandLineHalfWidth = pxF(0.8f);
-constexpr float kRiverLineHalfWidth = pxF(0.7f);
+constexpr float kShoreLineHalfWidth = pxF(0.75f);
+constexpr float kIslandLineHalfWidth = pxF(0.6f);
+constexpr float kRiverLineHalfWidth = pxF(0.525f);
 constexpr float kBorderLineHalfWidth = pxF(1.0f);
 /** Border dashes: visible length of each dash and of each gap. */
 constexpr float kBorderDashPx = pxF(5.0f);
@@ -128,12 +129,12 @@ constexpr uint8_t kRunwayLabelG = 210;
 constexpr uint8_t kRunwayLabelB = 230;
 
 /** Landmark lines: shores and islands, rivers (dimmer), and the border. */
-constexpr uint8_t kShoreR = 72;
-constexpr uint8_t kShoreG = 98;
-constexpr uint8_t kShoreB = 134;
-constexpr uint8_t kRiverR = 58;
-constexpr uint8_t kRiverG = 80;
-constexpr uint8_t kRiverB = 112;
+constexpr uint8_t kShoreR = 48;
+constexpr uint8_t kShoreG = 100;
+constexpr uint8_t kShoreB = 196;
+constexpr uint8_t kRiverR = 40;
+constexpr uint8_t kRiverG = 82;
+constexpr uint8_t kRiverB = 160;
 constexpr uint8_t kBorderR = 150;
 constexpr uint8_t kBorderG = 92;
 constexpr uint8_t kBorderB = 150;
