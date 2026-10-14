@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <new>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -584,12 +585,29 @@ void sortBeyondRingFarFirst(BeyondRingDrawItem* items, size_t count) {
   }
 }
 
+/**
+ * drawAircraft()'s per-frame lists. At ~4.3 KB they were over half of the 8 KB loop task
+ * stack, which overflowed (a panic) once deep drawing calls stacked on top. Kept in PSRAM.
+ */
+struct DrawLists {
+  AircraftDrawItem items[services::adsb::kMaxAircraft];
+  BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
+};
+DrawLists* s_draw_lists = nullptr;
+
 void drawAircraft() {
   const size_t n = s_snapshot.count;
   const services::adsb::Aircraft* planes = s_planes;
 
-  AircraftDrawItem items[services::adsb::kMaxAircraft];
-  BeyondRingDrawItem rim[services::adsb::kMaxAircraft];
+  if (s_draw_lists == nullptr) {
+    void* mem = heap_caps_malloc(sizeof(DrawLists), MALLOC_CAP_SPIRAM);
+    if (mem == nullptr) {
+      return;
+    }
+    s_draw_lists = new (mem) DrawLists();
+  }
+  AircraftDrawItem* items = s_draw_lists->items;
+  BeyondRingDrawItem* rim = s_draw_lists->rim;
   size_t draw_count = 0;
   size_t rim_count = 0;
 

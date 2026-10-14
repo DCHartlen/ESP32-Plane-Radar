@@ -94,6 +94,8 @@ constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 36;
 constexpr bool kDisplayRotate180 = false;
 /** Radar frame interval (start to start) while aircraft are moving on screen. */
 constexpr unsigned long kRadarRedrawIntervalMs = 250;
+/** Status line (uptime, boot count, last reset reason) in the serial log. */
+constexpr unsigned long kStatusLogIntervalMs = 60000;
 
 // --- Radar center defaults (overridden via WiFi setup portal) ---
 constexpr double kDefaultRadarLat = 52.3676;
