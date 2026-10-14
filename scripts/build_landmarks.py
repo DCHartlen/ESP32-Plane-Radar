@@ -28,6 +28,8 @@ import io
 import json
 import math
 import struct
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -40,7 +42,11 @@ OUT_INC = ROOT / "src" / "data" / "landmarks_local.inc"
 
 CACHE_DIR = ROOT / ".landmark_cache"
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Tried in turn when one is busy (HTTP 429/504) or unreachable.
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
 BASEMAP_WHEEL_JSON = "https://pypi.org/pypi/basemap-data-hires/2.0.0/json"
 BASEMAP_DATA_DIR = "mpl_toolkits/basemap_data/"
 NE_RIVERS_URL = (
@@ -52,11 +58,24 @@ NE_RIVERS_URL = (
 DEFAULT_RADIUS_KM = 75.0
 
 # OSM: lakes (and wide-river polygons) with a shorter outline than this are left out; about
-# a 1 km² lake. Named rivers shorter than MIN_RIVER_LENGTH_KM inside the sites are too.
+# a 1 km² lake. Named rivers shorter than MIN_RIVER_LENGTH_KM inside the sites are too, and
+# so are lake islands with a shorter outline than MIN_ISLAND_PERIMETER_KM (about 2.5 km²).
 MIN_WATER_PERIMETER_KM = 4.0
-MIN_RIVER_LENGTH_KM = 20.0
-# OSM: Douglas-Peucker tolerance, about half a pixel at the closest range preset (19 m/px).
-OSM_SIMPLIFY_KM = 0.01
+# Of what Overpass returns, lakes are only drawn with an outline of at least this (about a
+# 4 km² lake). Kept separate from the query's threshold so tuning it reuses the cache.
+MIN_LAKE_PERIMETER_KM = 8.0
+MIN_RIVER_LENGTH_KM = 50.0
+# After joining, river pieces (centerlines or banks) shorter than this are dropped.
+MIN_RIVER_PIECE_KM = 8.0
+MIN_ISLAND_PERIMETER_KM = 6.0
+# OSM: Douglas-Peucker tolerance, about 1.5 px at the closest range preset (19 m/px).
+OSM_SIMPLIFY_KM = 0.03
+# OSM: where a shore runs out and comes back with a neck narrower than SPIKE_NECK_KM (a pier,
+# a dock, a slip), cut straight across it. Only detours of SPIKE_MIN_DETOUR_KM to
+# SPIKE_MAX_DETOUR_KM of shoreline are cut, so real bays stay.
+SPIKE_NECK_KM = 0.25
+SPIKE_MIN_DETOUR_KM = 0.6
+SPIKE_MAX_DETOUR_KM = 6.0
 
 # GSHHG: lakes and islands smaller than this (km², GSHHG's own area) are left out.
 MIN_POLYGON_AREA_KM2 = 2.0
@@ -120,17 +139,26 @@ def load_sites(path: Path) -> list[tuple[float, float, float, float]]:
     return boxes
 
 
+def in_box(box: tuple[float, float, float, float], lon: float, lat: float) -> bool:
+    west, east, south, north = box
+    return west <= lon <= east and south <= lat <= north
+
+
 def in_region(lon: float, lat: float) -> bool:
-    return any(w <= lon <= e and s <= lat <= n for w, e, s, n in s_boxes)
+    return any(in_box(box, lon, lat) for box in s_boxes)
 
 
 def runs_in_region(points: list[Point]) -> list[list[Point]]:
-    """Splits a polyline into the runs inside the region, keeping one point beyond each end."""
+    return split_runs(points, in_region)
+
+
+def split_runs(points: list[Point], inside) -> list[list[Point]]:
+    """Splits a polyline into the runs where inside(lon, lat), keeping one point beyond each end."""
     runs: list[list[Point]] = []
     current: list[Point] = []
     prev: Point | None = None
     for p in points:
-        if in_region(*p):
+        if inside(*p):
             if not current and prev is not None:
                 current.append(prev)
             current.append(p)
@@ -253,21 +281,33 @@ def load_rivers() -> list[tuple[int, list[Point]]]:
     return lines
 
 
-def overpass_query(box: tuple[float, float, float, float]) -> str:
+def overpass_queries(box: tuple[float, float, float, float]) -> list[tuple[str, str]]:
+    """(layer, query) for one site, split by layer so none is heavy enough to time out.
+    Geometry is clipped to the box (outside nodes come back as null), so the Great Lakes'
+    huge outlines only return the part near the site."""
     west, east, south, north = box
     bbox = f"{south:.4f},{west:.4f},{north:.4f},{east:.4f}"
     min_perimeter_m = int(MIN_WATER_PERIMETER_KM * 1000)
-    return f"""[out:json][timeout:600];
-(
+    header = "[out:json][timeout:300];\n"
+    footer = f"out geom({bbox});\n"
+    return [
+        ("water", f"""{header}(
   way["natural"="water"]["water"!="wastewater"](if: length() > {min_perimeter_m})({bbox});
   way["waterway"="riverbank"](if: length() > {min_perimeter_m})({bbox});
   relation["natural"="water"]["water"!="wastewater"]({bbox});
-  way["natural"="coastline"]({bbox});
-  way["waterway"="river"]["name"]({bbox});
-  way["boundary"="administrative"]["admin_level"="2"]({bbox});
 );
-out geom;
-"""
+{footer}"""),
+        ("rivers", f"""{header}(
+  way["waterway"="river"]["name"]({bbox});
+);
+{footer}"""),
+        ("coastline", f"""{header}way["natural"="coastline"]({bbox});\n{footer}"""),
+        # The border through the lakes is mostly on the countries' boundary relations, not on
+        # tagged ways, so take the member ways of those relations inside the box.
+        ("border", f"""{header}relation["boundary"="administrative"]["admin_level"="2"]({bbox});
+way(r)({bbox});
+{footer}"""),
+    ]
 
 
 def run_overpass(query: str) -> dict:
@@ -277,19 +317,41 @@ def run_overpass(query: str) -> dict:
     if cached.exists():
         print(f"Using cached {cached.name}")
         return json.loads(cached.read_text(encoding="utf-8"))
-    print(f"Querying Overpass (can take a minute or two) -> {cached.name}")
-    request = urllib.request.Request(
-        OVERPASS_URL,
-        data=urllib.parse.urlencode({"data": query}).encode(),
-        headers={"User-Agent": "esp32-plane-radar build_landmarks.py"},
-    )
-    body = fetch(request)
-    cached.write_bytes(body)
-    return json.loads(body)
+    data = urllib.parse.urlencode({"data": query}).encode()
+    attempts = [url for _ in range(3) for url in OVERPASS_URLS]
+    for attempt, url in enumerate(attempts, 1):
+        print(f"Querying {url} -> {cached.name}")
+        request = urllib.request.Request(
+            url, data=data, headers={"User-Agent": "esp32-plane-radar build_landmarks.py"})
+        try:
+            body = fetch(request)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as err:
+            # A busy server or a dropped connection is worth retrying; a bad query isn't.
+            retryable = (not isinstance(err, urllib.error.HTTPError)
+                         or err.code in (429, 502, 503, 504))
+            if not retryable or attempt == len(attempts):
+                raise
+            wait_s = 30 * ((attempt + 1) // 2)
+            print(f"  {err}; retrying in {wait_s} s")
+            time.sleep(wait_s)
+            continue
+        response = json.loads(body)
+        # A query that runs out of time or memory still answers 200, with a "remark" and
+        # whatever elements it got so far. Retry it; never cache it as the answer.
+        remark = response.get("remark", "")
+        if "error" in remark.lower():
+            if attempt == len(attempts):
+                raise SystemExit(f"Overpass failed: {remark}")
+            print(f"  {remark}; retrying in 30 s")
+            time.sleep(30)
+            continue
+        cached.write_bytes(body)
+        return response
+    raise AssertionError("unreachable")
 
 
 def geometry_runs(geometry: list | None) -> list[list[Point]]:
-    """Overpass "geometry" as polylines; a null entry (a missing node) splits the line."""
+    """Overpass "geometry" as polylines; a null entry (a node outside the box) splits the line."""
     runs: list[list[Point]] = [[]]
     for node in geometry or []:
         if node is None:
@@ -300,9 +362,7 @@ def geometry_runs(geometry: list | None) -> list[list[Point]]:
 
 
 def osm_way_kind(tags: dict) -> int | None:
-    """The kind for a way's own tags, or None if it isn't drawn (or is a river centerline)."""
-    if tags.get("boundary") == "administrative" and tags.get("admin_level") == "2":
-        return KIND_BORDER
+    """The kind for a water or coastline way's tags, or None if it isn't drawn."""
     if tags.get("natural") == "coastline":
         return KIND_SHORE
     if tags.get("waterway") == "riverbank":
@@ -313,63 +373,146 @@ def osm_way_kind(tags: dict) -> int | None:
 
 
 def load_osm() -> list[Line]:
-    # Keyed by way id: overlapping sites, and a way that is both a lake and a member of a
-    # lake relation, are drawn once. The first kind seen wins.
-    drawn: dict[int, Line] = {}
+    lines: list[Line] = []
     river_parts: dict[str, list[list[Point]]] = {}  # named river centerlines, by name
 
-    def add(way_id: int, kind: int, geometry: list | None) -> None:
-        if way_id in drawn:
-            return
-        runs = geometry_runs(geometry)
-        if runs:
-            drawn[way_id] = (kind, runs[0])
-            for i, run in enumerate(runs[1:], 1):
-                drawn[-(way_id * 1000 + i)] = (kind, run)
+    for index, box in enumerate(s_boxes):
+        # Each site keeps only what earlier sites' boxes don't cover, so overlapping sites
+        # don't store the same shore twice.
+        earlier = s_boxes[:index]
 
-    for box in s_boxes:
-        for element in run_overpass(overpass_query(box))["elements"]:
-            tags = element.get("tags", {})
-            if element["type"] == "way":
-                if tags.get("waterway") == "river":
-                    river_parts.setdefault(tags["name"], []).extend(
-                        geometry_runs(element.get("geometry")))
-                    continue
-                kind = osm_way_kind(tags)
-                if kind is not None:
-                    add(element["id"], kind, element.get("geometry"))
-            elif element["type"] == "relation":
-                members = [m for m in element.get("members", [])
-                           if m.get("type") == "way" and m.get("geometry")]
-                outline_km = sum(length_km(run) for m in members
-                                 for run in geometry_runs(m["geometry"]))
-                if outline_km < MIN_WATER_PERIMETER_KM:
-                    continue
-                kind = KIND_RIVER if tags.get("water") == "river" else KIND_SHORE
-                for m in members:
-                    # Inner rings of a lake are its islands.
-                    member_kind = KIND_ISLAND if kind == KIND_SHORE and m.get("role") == "inner" \
-                        else kind
-                    add(m["ref"], member_kind, m["geometry"])
+        def new_runs(geometry: list | None) -> list[list[Point]]:
+            return [part for run in geometry_runs(geometry) for part in split_runs(
+                run, lambda lon, lat: not any(in_box(b, lon, lat) for b in earlier))]
 
-    lines = list(drawn.values())
+        # Within a site, a way that is both a lake and a lake relation's member is drawn
+        # once; the first kind seen wins.
+        seen: set[int] = set()
+
+        def add(way_id: int, kind: int, geometry: list | None) -> None:
+            if way_id not in seen:
+                seen.add(way_id)
+                lines.extend((kind, run) for run in new_runs(geometry))
+
+        for layer, query in overpass_queries(box):
+            for element in run_overpass(query)["elements"]:
+                tags = element.get("tags", {})
+                if layer == "border":
+                    if element["type"] == "way":
+                        add(element["id"], KIND_BORDER, element.get("geometry"))
+                    continue
+                if element["type"] == "way":
+                    if tags.get("waterway") == "river":
+                        river_parts.setdefault(tags["name"], []).extend(
+                            new_runs(element.get("geometry")))
+                        continue
+                    kind = osm_way_kind(tags)
+                    # A water way is a whole lake outline (coastline ways are only pieces).
+                    if layer == "water" and sum(length_km(run) for run in geometry_runs(
+                            element.get("geometry"))) < MIN_LAKE_PERIMETER_KM:
+                        continue
+                    if kind is not None:
+                        add(element["id"], kind, element.get("geometry"))
+                elif element["type"] == "relation":
+                    members = [m for m in element.get("members", [])
+                               if m.get("type") == "way" and m.get("geometry")]
+                    # Clipped to the box, so a big lake's outline here is only its nearby part.
+                    outline_km = sum(length_km(run) for m in members
+                                     for run in geometry_runs(m["geometry"]))
+                    if outline_km < MIN_LAKE_PERIMETER_KM:
+                        continue
+                    kind = KIND_RIVER if tags.get("water") == "river" else KIND_SHORE
+                    for m in members:
+                        # Inner rings of a lake are its islands; small ones are left out.
+                        inner = kind == KIND_SHORE and m.get("role") == "inner"
+                        if inner and sum(length_km(run) for run in geometry_runs(
+                                m["geometry"])) < MIN_ISLAND_PERIMETER_KM:
+                            continue
+                        add(m["ref"], KIND_ISLAND if inner else kind, m["geometry"])
+
     for name, parts in river_parts.items():
-        inside_km = sum(length_km(run) for part in parts for run in runs_in_region(part))
-        if inside_km >= MIN_RIVER_LENGTH_KM:
+        if sum(length_km(part) for part in parts) >= MIN_RIVER_LENGTH_KM:
             lines.extend((KIND_RIVER, part) for part in parts)
-    return lines
+    # OSM leaves stretches of some rivers unnamed, which strands short pieces; drop those.
+    return [(kind, points) for kind, points in join_lines(lines)
+            if kind != KIND_RIVER or length_km(points) >= MIN_RIVER_PIECE_KM]
+
+
+def join_lines(lines: list[Line]) -> list[Line]:
+    """Joins lines of the same kind that share an end point (OSM splits a shore into many
+    short ways), so smoothing sees a whole pier or slip rather than pieces of it. Where more
+    than two meet, the first unused one continues the line."""
+    joined: list[Line] = []
+    by_kind: dict[int, list[list[Point]]] = {}
+    for kind, points in lines:
+        by_kind.setdefault(kind, []).append(points)
+    for kind, parts in by_kind.items():
+        at_end: dict[Point, list[int]] = {}
+        for i, part in enumerate(parts):
+            at_end.setdefault(part[0], []).append(i)
+            at_end.setdefault(part[-1], []).append(i)
+        used = [False] * len(parts)
+        for i, part in enumerate(parts):
+            if used[i]:
+                continue
+            used[i] = True
+            line = list(part)
+            for forward in (True, False):
+                while True:
+                    tip = line[-1] if forward else line[0]
+                    nxt = next((j for j in at_end[tip] if not used[j]), None)
+                    if nxt is None:
+                        break
+                    used[nxt] = True
+                    piece = parts[nxt] if parts[nxt][0] == tip else parts[nxt][::-1]
+                    # piece now starts at tip.
+                    line = line + piece[1:] if forward else piece[::-1][:-1] + line
+            joined.append((kind, line))
+    return joined
 
 
 def to_units(deg: float) -> int:
     return int(round(deg * UNITS_PER_DEG))
 
 
-def build_chunks(lines: list[Line], tolerance_km: float):
+def cut_spikes(points: list[Point]) -> list[Point]:
+    """Cuts straight across narrow out-and-back detours (piers, docks): from each point, jump
+    to the farthest later point within SPIKE_NECK_KM whose path there is a detour of
+    SPIKE_MIN_DETOUR_KM to SPIKE_MAX_DETOUR_KM. A detour longer than half the line is never
+    cut, so a small closed outline can't collapse."""
+    if len(points) < 4:
+        return points
+    cos_lat = math.cos(math.radians(points[0][1]))
+    xy = [(lon * KM_PER_DEG * cos_lat, lat * KM_PER_DEG) for lon, lat in points]
+    along = [0.0]  # path length from the first point
+    for (x0, y0), (x1, y1) in zip(xy, xy[1:]):
+        along.append(along[-1] + math.hypot(x1 - x0, y1 - y0))
+    max_detour = min(SPIKE_MAX_DETOUR_KM, along[-1] * 0.5)
+
+    out = [points[0]]
+    i = 0
+    while i < len(points) - 1:
+        jump = i + 1
+        j = i + 2
+        while j < len(points) and along[j] - along[i] <= max_detour:
+            if (along[j] - along[i] >= SPIKE_MIN_DETOUR_KM
+                    and math.dist(xy[i], xy[j]) <= SPIKE_NECK_KM):
+                jump = j
+            j += 1
+        out.append(points[jump])
+        i = jump
+    return out
+
+
+def build_chunks(lines: list[Line], tolerance_km: float, cut_shore_spikes: bool):
     chunks = []  # (kind, lat0, lon0, min_lat, min_lon, max_lat, max_lon, first_delta, count)
     deltas: list[tuple[int, int]] = []  # (dlat, dlon)
     for kind, points in sorted(lines, key=lambda kl: kl[0]):
         for run in runs_in_region(points):
-            pts = [(to_units(lat), to_units(lon)) for lon, lat in densify(simplify(run, tolerance_km))]
+            run = simplify(run, tolerance_km)
+            if cut_shore_spikes and kind in (KIND_SHORE, KIND_ISLAND):
+                run = cut_spikes(run)
+            pts = [(to_units(lat), to_units(lon)) for lon, lat in densify(run)]
             # Drop repeats left by rounding.
             pts = [p for i, p in enumerate(pts) if i == 0 or p != pts[i - 1]]
             if len(pts) < 2:
@@ -429,7 +572,7 @@ def main() -> None:
         lines = load_gshhg() + load_rivers()
         tolerance_km = GSHHG_SIMPLIFY_KM
         attribution = "Shorelines and border: GSHHG/WDBII (LGPL). Rivers: Natural Earth."
-    chunks, deltas = build_chunks(lines, tolerance_km)
+    chunks, deltas = build_chunks(lines, tolerance_km, cut_shore_spikes=args.source == "osm")
     write_inc(chunks, deltas, attribution)
     per_kind = {name: 0 for name in KIND_NAMES.values()}
     for chunk in chunks:
