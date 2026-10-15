@@ -8,7 +8,7 @@ Arduino/PlatformIO firmware for an Adafruit Qualia ESP32-S3 (N16R8: 16 MB flash,
 
 ## Commands
 
-The firmware env is `qualia` (pinned pioarduino platform, Arduino core 3.x / ESP-IDF 5). `qualia_panel_test` extends it with `-DPANEL_TEST` and runs `hardware/panel_test` instead of the app (color bars, circles, text, looped HTTPS, button levels). `qualia_weather_spike` (`-DWEATHER_SPIKE`) runs `spike/weather_spike` instead: the weather radar de-risking spike, which draws Environment Canada's GeoMet radar PNG (`RADAR_1KM_RRAI`) around Milton, ON, steps the range with UP/DOWN and logs internal-RAM minimums through TLS and the PNG decode. The repo has no unit tests or linter. CI (`.github/workflows/build.yml`) only checks that the firmware builds.
+The firmware env is `qualia` (pinned pioarduino platform, Arduino core 3.x / ESP-IDF 5). `qualia_panel_test` extends it with `-DPANEL_TEST` and runs `hardware/panel_test` instead of the app (color bars, circles, text, looped HTTPS, button levels). `qualia_weather_spike` (`-DWEATHER_SPIKE`) runs `spike/weather_spike` instead: the weather radar de-risking spike, which fetches Environment Canada's GeoMet radar PNG (`RADAR_1KM_RRAI`, 360 px) around Milton, ON on a core-0 task, decodes it there into a PSRAM cache, and copies the cache to the screen at 2x each frame. UP/DOWN step the range. It logs internal-RAM minimums through TLS and the decode, and the decode and per-frame copy times. The repo has no unit tests or linter. CI (`.github/workflows/build.yml`) only checks that the firmware builds.
 
 ```bash
 pio run -e qualia                    # build; also writes .pio/build/qualia/firmware.factory.bin (flash at 0x0)
