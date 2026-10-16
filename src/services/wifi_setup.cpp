@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -36,10 +37,30 @@ void startLanWebPortal();
 void stopLanWebPortal();
 bool wifiLinkUp();
 
-/** Hold UP 3 s: wipe settings and reboot into the portal. Runs on the main task. */
+/** Seconds left on the countdown screen; 0 while it isn't shown. */
+int s_countdown_shown = 0;
+bool s_countdown_cancelled = false;
+
+/**
+ * Hold UP and DOWN 3 s: wipe settings and reboot into the portal. Past
+ * kResetCountdownAfterMs it shows the seconds left; letting go cancels. Runs on the main task.
+ */
 void pollResetButton() {
   if (buttonsResetRequested()) {
     wifiResetCredentialsAndReboot();
+  }
+  const unsigned long held_ms = buttonsBothHeldMs();
+  if (held_ms >= config::kResetCountdownAfterMs) {
+    const unsigned long left_ms =
+        config::kResetHoldMs > held_ms ? config::kResetHoldMs - held_ms : 0;
+    const int seconds = std::max(1, static_cast<int>((left_ms + 999) / 1000));
+    if (seconds != s_countdown_shown) {
+      s_countdown_shown = seconds;
+      statusScreenResetCountdown(seconds);
+    }
+  } else if (s_countdown_shown != 0) {
+    s_countdown_shown = 0;
+    s_countdown_cancelled = true;
   }
 }
 
@@ -330,7 +351,10 @@ bool waitForLinkWithUi(const char* ssid_for_ui, unsigned long attempt_ms) {
       return true;
     }
     pollResetButton();
-    statusScreenConnectingTick();
+    // The spinner redraws the whole screen, so it also replaces a cancelled countdown.
+    if (s_countdown_shown == 0) {
+      statusScreenConnectingTick();
+    }
     delay(config::kWifiConnectingFrameMs);
   }
   return wifiLinkUp();
@@ -408,6 +432,9 @@ bool openConfigPortal() {
   s_wm.startConfigPortal(config::kPortalApName);
   while (s_wm.getConfigPortalActive()) {
     pollResetButton();
+    if (wifiTakeResetCountdownCancelled()) {
+      statusScreenPortal();
+    }
     if (s_wm.process()) {
       return true;
     }
@@ -456,6 +483,14 @@ void wifiLoop() {
     stopLanWebPortal();
   }
   pollResetButton();
+}
+
+bool wifiResetCountdownShowing() { return s_countdown_shown != 0; }
+
+bool wifiTakeResetCountdownCancelled() {
+  const bool cancelled = s_countdown_cancelled;
+  s_countdown_cancelled = false;
+  return cancelled;
 }
 
 bool wifiSetupConnect() {

@@ -23,8 +23,12 @@ constexpr unsigned long kWifiDownGraceMs = 4000;
 constexpr unsigned long kWifiReconnectIntervalMs = 15000;
 
 // --- Buttons (Qualia UP/DOWN on the PCA9554 expander; GPIO0/BOOT is display line B4) ---
-/** Holding UP this long clears Wi-Fi + settings and reboots into the portal. */
+/** Holding UP and DOWN together this long clears Wi-Fi + settings and reboots into the portal. */
 constexpr unsigned long kResetHoldMs = 3000UL;
+/** Both buttons held this long shows the reset countdown (releasing cancels it). */
+constexpr unsigned long kResetCountdownAfterMs = 700UL;
+/** Holding one button alone this long: UP switches mode, DOWN replays the weather radar. */
+constexpr unsigned long kButtonHoldMs = 1000UL;
 /** Expander poll period; a level counts after 2 identical samples in a row. */
 constexpr unsigned long kButtonPollMs = 20;
 /** Range taps are saved to NVS once no tap has arrived for this long. */
@@ -131,6 +135,19 @@ constexpr float kDeadReckonMaxSec = 15.0f;
  * one. Reported tracks wobble 1-3 degrees between fetches even in straight flight.
  */
 constexpr float kTrackSmoothingSec = 1.0f;
+
+// --- Weather radar (Environment Canada GeoMet, North America only) ---
+/** How often to ask GeoMet for its newest time step (a new one comes every 6 min). */
+constexpr unsigned long kWeatherCheckIntervalMs = 120000;
+/** Wait after a failed request before trying again. */
+constexpr unsigned long kWeatherRetryMs = 30000;
+/** Radar images kept for the replay (6 min apart, so 10 is the last hour). */
+constexpr size_t kWeatherHistoryFrames = 10;
+/** The image age label turns to the alert colour past this. */
+constexpr unsigned long kWeatherStaleAfterMs = 20UL * 60UL * 1000UL;
+/** Replay: time each frame stays up (decode and draw included), and the hold on the last. */
+constexpr unsigned long kWeatherReplayFrameMs = 400;
+constexpr unsigned long kWeatherReplayLastFrameMs = 1500;
 
 // --- Clock ---
 constexpr char kNtpServer1[] = "pool.ntp.org";

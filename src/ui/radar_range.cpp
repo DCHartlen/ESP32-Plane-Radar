@@ -15,25 +15,55 @@ namespace {
 
 constexpr char kPrefsNamespace[] = "planeradar";
 constexpr char kPrefsRangeKey[] = "rangeIdx";
+constexpr char kPrefsWeatherRangeKey[] = "wxRangeIdx";
+constexpr char kPrefsModeKey[] = "mode";
 constexpr char kPrefsMilesKey[] = "useMiles";
 constexpr char kPrefsRunwaysKey[] = "showRwys";
 constexpr char kPrefsLandmarksKey[] = "showLand";
-constexpr uint8_t kDefaultRangeIndex = 1;  // 10 km ring
+constexpr uint8_t kDefaultRangeIndex = 1;         // 10 km ring
+constexpr uint8_t kDefaultWeatherRangeIndex = 1;  // 50 km ring
 constexpr float kKmPerMile = 1.609344f;
 
+static_assert(kWeatherRangePresetCount > 0 &&
+                  kWeatherRangePresets[kWeatherRangePresetCount - 1].ring3_km ==
+                      kWeatherRangePresets[0].ring3_km * (1 << (kWeatherRangePresetCount - 1)),
+              "weather presets must halve from the widest one");
+
 Preferences s_prefs;
+Mode s_mode = Mode::Plane;
 uint8_t s_range_index = kDefaultRangeIndex;
+uint8_t s_weather_range_index = kDefaultWeatherRangeIndex;
 bool s_use_miles = false;
 bool s_show_runways = true;
 bool s_show_landmarks = true;
 bool s_range_save_pending = false;
 unsigned long s_range_changed_ms = 0;
 
-void saveRangeIndex() {
+/** The current mode's preset list, its length, and its index. */
+const RangePreset* presets() {
+  return s_mode == Mode::Weather ? kWeatherRangePresets : kRangePresets;
+}
+
+size_t presetCount() {
+  return s_mode == Mode::Weather ? kWeatherRangePresetCount : kRangePresetCount;
+}
+
+uint8_t& currentIndex() {
+  return s_mode == Mode::Weather ? s_weather_range_index : s_range_index;
+}
+
+void markRangeChanged() {
+  s_range_save_pending = true;
+  s_range_changed_ms = millis();
+}
+
+void saveModeAndRanges() {
   if (!s_prefs.begin(kPrefsNamespace, false)) {
     return;
   }
+  s_prefs.putUChar(kPrefsModeKey, static_cast<uint8_t>(s_mode));
   s_prefs.putUChar(kPrefsRangeKey, s_range_index);
+  s_prefs.putUChar(kPrefsWeatherRangeKey, s_weather_range_index);
   s_prefs.end();
 }
 
@@ -82,49 +112,69 @@ void rangeInit() {
   const uint8_t saved = s_prefs.getUChar(kPrefsRangeKey, kDefaultRangeIndex);
   s_range_index =
       (saved < kRangePresetCount) ? saved : kDefaultRangeIndex;
+  const uint8_t saved_wx = s_prefs.getUChar(kPrefsWeatherRangeKey, kDefaultWeatherRangeIndex);
+  s_weather_range_index =
+      (saved_wx < kWeatherRangePresetCount) ? saved_wx : kDefaultWeatherRangeIndex;
+  s_mode = s_prefs.getUChar(kPrefsModeKey, 0) == static_cast<uint8_t>(Mode::Weather)
+               ? Mode::Weather
+               : Mode::Plane;
   s_use_miles = s_prefs.getBool(kPrefsMilesKey, false);
   s_show_runways = s_prefs.getBool(kPrefsRunwaysKey, true);
   s_show_landmarks = s_prefs.getBool(kPrefsLandmarksKey, true);
   s_prefs.end();
 }
 
+Mode mode() { return s_mode; }
+
+void setMode(Mode mode) {
+  if (mode == s_mode) {
+    return;
+  }
+  s_mode = mode;
+  markRangeChanged();
+}
+
 bool rangeNext() {
-  if (s_range_index + 1 >= kRangePresetCount) {
+  uint8_t& index = currentIndex();
+  if (index + 1u >= presetCount()) {
     return false;
   }
-  ++s_range_index;
-  s_range_save_pending = true;
-  s_range_changed_ms = millis();
+  ++index;
+  markRangeChanged();
   return true;
 }
 
 bool rangePrev() {
-  if (s_range_index == 0) {
+  uint8_t& index = currentIndex();
+  if (index == 0) {
     return false;
   }
-  --s_range_index;
-  s_range_save_pending = true;
-  s_range_changed_ms = millis();
+  --index;
+  markRangeChanged();
   return true;
 }
 
 void rangeSaveIfDue() {
   if (s_range_save_pending && millis() - s_range_changed_ms >= config::kRangeSaveDelayMs) {
     s_range_save_pending = false;
-    Serial.printf("Range saved to NVS at %lu ms\n", millis());
-    saveRangeIndex();
+    Serial.printf("Mode and range saved to NVS at %lu ms\n", millis());
+    saveModeAndRanges();
   }
 }
 
-const RangePreset& rangeCurrent() { return kRangePresets[s_range_index]; }
+const RangePreset& rangeCurrent() { return presets()[currentIndex()]; }
 
-uint8_t rangeIndex() { return s_range_index; }
+uint8_t rangeIndex() { return currentIndex(); }
 
 float fetchRadiusKm() {
   const float outer_km = rangeCurrent().outer_km;
   const float screen_r_px =
       static_cast<float>(kCenterX - kBeyondRingScreenMarginPx);
   return outer_km * (screen_r_px / static_cast<float>(kGridOuterRadius));
+}
+
+float screenHalfWidthKm(const RangePreset& preset) {
+  return preset.outer_km * static_cast<float>(kCenterX) / static_cast<float>(kGridOuterRadius);
 }
 
 bool useMiles() { return s_use_miles; }

@@ -17,7 +17,9 @@ as phases land.
   LovyanGFX, into a 720×720 16-bit `LGFX_Sprite` in PSRAM, which is pushed with
   `draw16bitBeRGBBitmap`. The sprite stores RGB565 byte-swapped.
 - **Buttons:** Qualia UP/DOWN on the PCA9554 expander (0x3F, pins 5/6), polled from a FreeRTOS
-  task. UP = zoom out, DOWN = zoom in, clamped at the ends. Holding **UP for 3 s** resets. **GPIO0/BOOT is
+  task. UP = zoom out, DOWN = zoom in, clamped at the ends. Since weather mode: hold UP 1 s
+  switches mode, hold DOWN 1 s replays the weather radar, and holding **UP + DOWN for 3 s**
+  resets (with a countdown screen), so one stray long press can't wipe the settings. **GPIO0/BOOT is
   display line B4 and must not be used at runtime.** It still works as a strapping pin for
   flashing (BOOT+RESET).
 - **No hard-coded pixel sizes.** Layout is derived from the screen size, and element sizes scale
@@ -196,6 +198,43 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
 - Workspace and `.vscode` env names. The untracked `parts` note goes into the README or gets deleted.
 - Confirm CI and the release workflow with `workflow_dispatch`.
 
+## Weather mode (built 2026-10-15; not yet tested on hardware)
+
+- **Source:** ECCC GeoMet WMS, layer `RADAR_1KM_RRAI` (North American composite incl. NEXRAD,
+  1 km cells, 6 min steps, 3 h kept, no key). Chosen over RainViewer, whose free tier is capped
+  at zoom 7 and is personal-use only since Jan 2026. Coverage box from GetCapabilities:
+  lat 16.9–67.2, lon −170.3 to −50; outside it the screen says "No radar coverage".
+- **One mode at a time**, switched by holding UP; saved in NVS (`planeradar/mode`). Leaving plane
+  mode invalidates the aircraft; only the current mode's fetch task runs.
+- **Ranges 25/50/100 km** on ring 3 (`wxRangeIdx`). Every image is fetched once at the 100 km
+  extent (360 px, 0.80 km/px) and the narrower presets show its centre at 4x/8x on screen, so
+  range changes don't fetch and the replay history serves every range.
+  **Checked 2026-10-15** (`extent_test.py`, scratch): GeoMet renders per output pixel with no
+  smoothing (a 25 km image and the matching centre of a 1440 px 100 km image are 99.95%
+  identical; blocks are ~1.6 km runs at every scale). The single-extent crop matches the
+  native 25 km image on 74% of pixels: the same cells, with block edges up to half a pixel
+  (0.4 km) off, because 0.80 km pixels don't line up with 1 km cells. No features lost.
+- **History:** the last 10 steps (one hour) as PNGs in PSRAM (≤35 KB each), fetched newest
+  first, then backfilled. Hold DOWN replays them oldest first at 400 ms a frame, holds the last
+  1.5 s, then shows the live image.
+- **Core-0 PSRAM rule:** the fetch task only downloads; the loop task (core 1) decodes. This
+  replaces the agreed "pause every 16 lines" throttle: decoding where the panel ISR runs can't
+  overlap the refill at all, and needs no tuning. The decoder's 11 KB state is on the heap, so
+  the 8 KB loop stack is fine; check `loop stack min free` in the log after a replay.
+- **Screen:** blue-grey grid on a greyer navy (the spike's palette), landmarks under the rain,
+  runways, rings and labels over it, the image's age above the clock (yellow past 20 min).
+- **Landmarks:** `build_landmarks.py` now bakes 150 km around each site (was 75), which
+  reaches the screen edge at 100 km (~144 km); the layer's view box is the screen, not the
+  outer ring. Regenerated 2026-10-15 for the radar centre.
+- **Known limits:** the cardinal
+  letters' anti-aliasing is blended against the background, so they get a faint dark fringe
+  over rain.
+- **To test on hardware:** mode switch both ways (and after a reboot), range taps at each preset,
+  the replay (also a zoom and a mode switch mid-replay), a location change in the portal (the
+  old image must not stay), the reset countdown and cancelling it in both modes and on the
+  portal screen, a Wi-Fi drop in weather mode, a location outside North America, and the
+  frame roll during replays.
+
 ## Open issues
 
 ### Pixel clock: 16 MHz works with 36-line bounce buffers (resolved 2026-10-02)
@@ -280,14 +319,17 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
      radar time steps, ~20 range changes, PNGs up to 34 KB, where the roll used to appear
      from the first frame). TLS internal-RAM minimum rose from 29–36 KB to 61 KB. Which of
      the three settings fixed it isn't isolated; the 64B line is the one Espressif requires.
-     Still wanted: an overnight soak and a cold start. One frame's copy doubled (37 to 66 ms)
-     while the core-0 task decoded into PSRAM, so step 2 still applies. The rebuild can't include TinyUSB
+     No dedicated soak: that was for 120 MHz, which isn't used; normal use and a cold start
+     serve. One frame's copy doubled (37 to 66 ms) while the core-0 task decoded into PSRAM,
+     so step 2 still applies. The rebuild can't include TinyUSB
      (pioarduino/platform-espressif32#505), so `Serial` moved to the hardware USB-Serial/JTAG
      port (`ARDUINO_USB_MODE=1`). pioarduino writes the rebuilt libraries over the shared
      `framework-arduinoespressif32-libs/esp32s3/qio_opi` package, so other projects on this
      machine that use that package version get them too.
   2. A rule for all modes: no unthrottled bulk PSRAM work on core 0. Do it on core 1, or in
-     ~4 KB chunks with a 1 ms delay. The weather mode is designed around this.
+     ~4 KB chunks with a 1 ms delay. Weather mode (2026-10-15) does it on core 1: its core-0
+     task only downloads PNGs (≤35 KB), and the loop task decodes them. The panel's refill ISR
+     runs on core 1 too, so the decode can't run at the same time as it.
   3. Fallbacks if the margin is still too thin: lower pclk (12 MHz shimmered before), larger
      bounce buffers (no internal RAM to spare next to TLS).
 - **Kept from earlier:** `setup()` calls `displayResync()` on `ARDUINO_EVENT_WIFI_STA_GOT_IP`

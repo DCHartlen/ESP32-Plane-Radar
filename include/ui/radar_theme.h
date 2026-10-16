@@ -105,13 +105,20 @@ constexpr int kClimbArrowMinFpm = 300;
 constexpr int kClimbArrowWidthPx = px(7);
 constexpr int kClimbArrowGapPx = px(2);
 
-/** RGB565 palette targets (applied in initPalette). */
+/** RGB565 palette targets (applied in applyPalette). Plane mode: navy with a green grid. */
 constexpr uint8_t kBgR = 4;
 constexpr uint8_t kBgG = 10;
 constexpr uint8_t kBgB = 28;
 constexpr uint8_t kGridR = 16;
 constexpr uint8_t kGridG = 100;
 constexpr uint8_t kGridB = 32;
+/** Weather mode: a greyer navy with a blue-grey grid, so the green rain stands out. */
+constexpr uint8_t kWeatherBgR = 8;
+constexpr uint8_t kWeatherBgG = 16;
+constexpr uint8_t kWeatherBgB = 24;
+constexpr uint8_t kWeatherGridR = 90;
+constexpr uint8_t kWeatherGridG = 110;
+constexpr uint8_t kWeatherGridB = 120;
 /** Tag type line: neutral grey, so the colours stay free for altitude. */
 constexpr uint8_t kTagTypeR = 170;
 constexpr uint8_t kTagTypeG = 180;

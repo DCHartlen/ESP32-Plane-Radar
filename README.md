@@ -22,7 +22,10 @@ The panel plugs straight into the Qualia's 40-pin connector, so there's no wirin
 ## What it does
 
 1. **Wi‑Fi setup** (if needed): captive portal on AP **`PlaneRadar-Setup`**
-2. **Radar**: live aircraft from [adsb.fi](https://opendata.adsb.fi/) on a sonar-style grid, refreshed every 5 s
+2. **Plane mode**: live aircraft from [adsb.fi](https://opendata.adsb.fi/) on a sonar-style grid, refreshed every 5 s
+3. **Weather mode**: Environment Canada's weather radar around the same location (North America only), with a replay of the last hour
+
+One mode shows at a time; hold UP to switch. The mode is remembered across reboots.
 
 After Wi‑Fi is saved, the device reconnects automatically. If Wi‑Fi drops, it shows a "Connecting" screen and keeps retrying. It never reopens the setup portal on its own.
 
@@ -30,11 +33,13 @@ After Wi‑Fi is saved, the device reconnects automatically. If Wi‑Fi drops, i
 
 | Action | Effect |
 |--------|--------|
-| **UP** tap | Zoom out to the next range preset (stops at 25 km) |
-| **DOWN** tap | Zoom in to the previous range preset (stops at 5 km) |
-| **Hold UP 3 s** | Clear Wi‑Fi, location and units; reboot into the setup portal |
+| **UP** tap | Zoom out to the next range preset |
+| **DOWN** tap | Zoom in to the previous range preset |
+| **Hold UP 1 s** | Switch between plane and weather mode |
+| **Hold DOWN 1 s** | Weather mode: replay the last hour of radar |
+| **Hold UP + DOWN 3 s** | Clear Wi‑Fi, location and units; reboot into the setup portal |
 
-Taps register even while a fetch or redraw is in progress. The range is saved to flash 2 s after the last tap. Hold UP works on every screen, including setup and connecting.
+Taps register even while a fetch or redraw is in progress. Each mode keeps its own range, saved to flash 2 s after the last change. After both buttons have been held for a moment, a yellow countdown shows; let go before it ends to cancel the reset. The reset works on every screen, including setup and connecting.
 
 ## Wi‑Fi setup portal
 
@@ -121,6 +126,15 @@ A single failed fetch doesn't trigger a message.
 - Poll interval: `kAdsbFetchIntervalMs` (5 s) in `config.h`
 - Ground aircraft hidden by default (`kAdsbShowGroundAircraft`)
 
+## Weather radar
+
+- Source: Environment Canada's [GeoMet](https://eccc-msc.github.io/open-data/msc-geomet/readme_en/) WMS, layer `RADAR_1KM_RRAI` (North American rain-rate composite, Canadian and US radars, 1 km cells, a new image every 6 min). No key needed.
+- Ranges: 25, 50 and 100 km on ring 3 (`kWeatherRangePresets`). Every image is fetched once at the 100 km extent; the narrower ranges show its centre at 2× and 4× the scale, so changing range needs no download and the replay works at every range.
+- The last 10 images (one hour) are kept in PSRAM. **Hold DOWN** plays them oldest to newest, then returns to the live image.
+- Above the clock: the image's age (`Radar 6 min ago`), in yellow once it's over 20 min old. During a replay it shows each image's time.
+- Same runways, landmarks, rings and clock as plane mode, on a blue-grey grid.
+- Outside the radar's coverage (roughly lat 17–67°, lon −170 to −50°) it says "No radar coverage".
+
 ## Configuration
 
 Edit **`include/config.h`** for hardware and behavior:
@@ -129,12 +143,13 @@ Edit **`include/config.h`** for hardware and behavior:
 |------|----------------|
 | Portal | `kPortalApName`, `kPortalIp`, `kPortalHostname` / `kPortalHostUrl` (mDNS; needs `-DWM_MDNS` in `platformio.ini`) |
 | Wi‑Fi timing | Connect attempts, reconnect grace and interval, portal timeout (`0` = no timeout) |
-| Buttons | `kResetHoldMs`, `kButtonPollMs`, `kRangeSaveDelayMs`, expander pins, `kButtonActiveLow` |
+| Buttons | `kButtonHoldMs`, `kResetHoldMs`, `kResetCountdownAfterMs`, `kButtonPollMs`, `kRangeSaveDelayMs`, expander pins, `kButtonActiveLow` |
 | Display | RGB pins, panel timings, `kPanelPclkHz` (16 MHz; needs the 36-line bounce buffer, see `docs/qualia-port-plan.md`), `kPanelBounceBufferPx`, `kDisplayRotate180` |
 | Default location | `kDefaultRadarLat`, `kDefaultRadarLon` (until the portal overrides them) |
 | ADS-B | `kAdsbFetchIntervalMs`, `kAdsbStaleAfterMs`, `kAdsbShowGroundAircraft` |
+| Weather | `kWeatherCheckIntervalMs`, `kWeatherHistoryFrames`, `kWeatherStaleAfterMs`, replay frame times |
 
-Range presets: `include/ui/radar_range.h` (`kRangePresets`).
+Range presets: `include/ui/radar_range.h` (`kRangePresets`, `kWeatherRangePresets`).
 
 ## Project layout
 
@@ -153,14 +168,18 @@ include/
     ui_scale.h
     radar_theme.h
     radar_geometry.h
-    radar_range.h
-    radar_display.h
+    radar_range.h         — range presets for both modes, and the mode
+    radar_frame.h         — grid, labels and clock both modes draw
+    radar_display.h       — plane mode
+    weather_display.h     — weather mode and its replay
     runway_overlay.h
+    landmark_overlay.h
     status_screens.h
   services/
     wifi_setup.h
     radar_location.h
     adsb_client.h
+    weather_client.h      — GeoMet radar images (fetch task)
 data/
   ui_font_small.vlw       — embedded smooth UI fonts (generated)
   ui_font_large.vlw
@@ -189,7 +208,7 @@ pio device monitor
 ```
 
 - PlatformIO env: **`qualia`**, on the pinned [pioarduino](https://github.com/pioarduino/platform-espressif32) platform (Arduino core 3.x / ESP-IDF 5)
-- Serial: **115200** baud (USB CDC; the boot waits up to 3 s for a monitor)
+- Serial: **115200** baud, on the S3's built-in USB serial port (the boot waits up to 3 s for a monitor)
 - If upload can't find the port, put the board in download mode: hold **BOOT**, tap **RESET**, release BOOT
 - On Windows, run `pio` from PowerShell or cmd, not Git Bash (ESP-IDF's tool installer refuses MSys)
 

@@ -54,8 +54,9 @@ NE_RIVERS_URL = (
     "ne_10m_rivers_lake_centerlines.geojson"
 )
 
-# Default radius around each site: room for range presets wider than today's (~33 km).
-DEFAULT_RADIUS_KM = 75.0
+# Default radius around each site: the screen edge at the widest preset, weather mode's 100 km
+# ring 3 (outer ring 133 km, screen edge ~144 km).
+DEFAULT_RADIUS_KM = 150.0
 
 # OSM: lakes (and wide-river polygons) with a shorter outline than this are left out; about
 # a 1 km² lake. Named rivers shorter than MIN_RIVER_LENGTH_KM inside the sites are too, and

@@ -31,13 +31,19 @@ constexpr float kDegToRad = 3.14159265f / 180.0f;
  */
 constexpr float kMinSegmentPx = 1.5f;
 
-/** What the layer was drawn for; any change redraws it. */
+/**
+ * What the layer was drawn for; any change redraws it. Keyed by distance rather than preset
+ * index, so a range both modes share (25 km) reuses the layer. The background is part of it
+ * because each mode has its own and the lines are blended onto it.
+ */
 struct LayerKey {
-  uint8_t range_index;
+  float outer_km;
   double lat;
   double lon;
+  uint16_t background;
   bool operator==(const LayerKey& o) const {
-    return range_index == o.range_index && lat == o.lat && lon == o.lon;
+    return outer_km == o.outer_km && lat == o.lat && lon == o.lon &&
+           background == o.background;
   }
 };
 
@@ -51,6 +57,8 @@ struct RowSpan {
 };
 
 LGFX_Sprite s_layer;
+/** The background the layer is filled with outside the lines. */
+uint16_t s_layer_background = 0;
 bool s_alloc_failed = false;
 bool s_layer_valid = false;
 LayerKey s_key{};
@@ -99,6 +107,7 @@ bool allocateLayer(LGFX_Sprite& frame) {
   // Same rotation as the frame, so buffer rows line up for the copy.
   s_layer.setRotation(frame.getRotation());
   s_layer.fillScreen(radar::kColorBackground);
+  s_layer_background = radar::kColorBackground;
   for (RowSpan& span : s_spans) {
     span = {kW, 0};
   }
@@ -227,7 +236,7 @@ void drawDashed(float x0, float y0, float x1, float y1, const LineStyle& style,
   }
 }
 
-/** The box the outer ring covers, in dataset units (1e-5 degree). */
+/** The box the screen covers (past the outer ring, to the edge), in dataset units (1e-5 degree). */
 struct ViewBox {
   int32_t min_lat;
   int32_t max_lat;
@@ -238,9 +247,9 @@ struct ViewBox {
 ViewBox currentViewBox() {
   const double lat = services::location::lat();
   const double lon = services::location::lon();
-  const float outer_km = radar::rangeCurrent().outer_km;
-  const float dlat_deg = outer_km / kKmPerDeg;
-  const float dlon_deg = outer_km / (kKmPerDeg * cosf(static_cast<float>(lat) * kDegToRad));
+  const float half_km = radar::screenHalfWidthKm(radar::rangeCurrent());
+  const float dlat_deg = half_km / kKmPerDeg;
+  const float dlon_deg = half_km / (kKmPerDeg * cosf(static_cast<float>(lat) * kDegToRad));
   const auto units = [](double deg) {
     return static_cast<int32_t>(lround(deg * data::landmarks::kUnitsPerDeg));
   };
@@ -363,8 +372,8 @@ void prepareLandmarks(LGFX_Sprite& frame) {
   if (!radar::showLandmarks()) {
     return;
   }
-  const LayerKey key{radar::rangeIndex(), services::location::lat(),
-                     services::location::lon()};
+  const LayerKey key{radar::rangeCurrent().outer_km, services::location::lat(),
+                     services::location::lon(), radar::kColorBackground};
   if (s_layer_valid && key == s_key) {
     return;
   }
@@ -373,6 +382,12 @@ void prepareLandmarks(LGFX_Sprite& frame) {
   const ViewBox view = currentViewBox();
   s_has_lines = false;
   if (anyChunkInView(view) && allocateLayer(frame)) {
+    if (s_layer_background != radar::kColorBackground) {
+      // The other mode's background: lines blend onto what's under them, and new spans can
+      // land anywhere.
+      s_layer.fillScreen(radar::kColorBackground);
+      s_layer_background = radar::kColorBackground;
+    }
     redrawLayer(view);
   }
   s_key = key;
