@@ -327,9 +327,10 @@ def run_overpass(query: str) -> dict:
         try:
             body = fetch(request)
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as err:
-            # A busy server or a dropped connection is worth retrying; a bad query isn't.
+            # A busy server or a dropped connection is worth retrying; a bad query (400) isn't.
+            # overpass.kumi.systems answers 500 when it's overloaded, so 500 retries too.
             retryable = (not isinstance(err, urllib.error.HTTPError)
-                         or err.code in (429, 502, 503, 504))
+                         or err.code in (429, 500, 502, 503, 504))
             if not retryable or attempt == len(attempts):
                 raise
             wait_s = 30 * ((attempt + 1) // 2)
