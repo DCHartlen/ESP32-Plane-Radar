@@ -225,26 +225,77 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
   `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n` (pioarduino recompiles the framework, first build
   10–30 min), then PSRAM at 120 MHz, then dropping pclk while the portal is open.
 
-### Frame roll with bounce buffers (2026-10-02, once since 36-line buffers; fix pending test)
+### Frame roll: the PSRAM bandwidth budget (root cause found 2026-10-14; open)
 
-- **Symptom:** the whole image rolled up ~30-40 rows (N drawn under S) and stayed that way for
-  minutes while the radar kept redrawing. It's a bounce-buffer refill slip (20-line buffers), and
-  the framework's `CONFIG_LCD_RGB_RESTART_IN_VSYNC=y` didn't resync it.
-- **Likely triggers:** flash writes (NVS range save, Wi-Fi connect) while the RGB ISR isn't
-  IRAM-safe, and PSRAM load from the 1 MB present copy.
-- **Status:** not seen at 16 MHz with 36-line buffers, including range changes with NVS saves
-  over several minutes (2026-10-02). The no-copy esp_lcd rewrite (`docs/improvements-plan.md`,
-  roadmap step 1) has since removed the 1 MB copy load.
-- **One slip after the rewrite:** in the panel test, the image shifted up right after Wi-Fi first
-  connected (the driver writes to flash then) and stayed shifted until reset. Minutes of running
-  and button presses didn't cause another. Fix: `setup()` calls `displayResync()`
-  (`esp_lcd_rgb_panel_restart()`, re-aligns at the next VSYNC) on `ARDUINO_EVENT_WIFI_STA_GOT_IP`;
-  the serial log prints `panel: scan-out resync`. **Not yet verified on hardware.**
-- **If slips show up at other times:** call `displayResync()` after those flash writes too, or
-  rebuild the framework with `custom_sdkconfig`: `CONFIG_LCD_RGB_ISR_IRAM_SAFE=y` (the actual
-  cause: the refill ISR can't run while flash is written), possibly with
-  `CONFIG_SPIRAM_XIP_FROM_PSRAM=y`, `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`,
-  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`.
+- **Symptom:** the whole image rolls vertically (the top of the radar drawn at the bottom) and
+  stays that way. Seen once in plane mode (2026-10-02, 20-line buffers), once in the panel test
+  right after Wi-Fi connected, and reliably in the weather spike (`qualia_weather_spike`) from
+  its first frame after boot, even after a power cycle. `qualia` built from the same tree and
+  pinned libraries ran several minutes of range changes without it (2026-10-14).
+- **Mechanism (ESP-IDF RGB LCD guide):** in bounce-buffer mode the GDMA EOF ISR copies each
+  block of lines from the PSRAM framebuffer into internal RAM through the data cache. If the
+  other core is copying PSRAM at the same time, the two share its bandwidth, the copy overruns,
+  the driver misses its buffer switch, and the DMA and panel addresses desynchronise. The guide
+  says this can leave "a permanently shifted image"; `CONFIG_LCD_RGB_RESTART_IN_VSYNC=y` (already
+  set in the prebuilt framework) only recovers sometimes. Flash writes cause the same miss,
+  because the cache (and so PSRAM) is off while flash is written.
+- **The budget:** 720×720 at 16 MHz reads ~32 MB/s from PSRAM during active lines (~25 MB/s
+  average at ~25 Hz). Espressif's FAQ puts the limit for octal PSRAM at 80 MHz at about 22 MHz
+  pclk, so the display alone uses ~73% of it. Each 36-line bounce buffer covers ~1.8 ms of
+  scan-out, so a refill copies 52 KB in 1.8 ms (~28 MB/s); sharing the bus with the other core
+  leaves it less than that. **Any bulk PSRAM work on core 0 that lasts more than ~2 ms can roll
+  the image.** For comparison, ESP-MeteoPlaneRadar (480×480 at 8 MHz, ~16 MB/s, ~36% of the
+  limit) decodes radar frames into PSRAM on core 0 without throttling and gets away with it; its
+  only defence is turning the ST7701 off and on to clear a shift.
+- **Why plane mode survives:** the refill ISR runs on core 1 (the panel is created from
+  `setup()`), and plane mode's heavy PSRAM work (clearing and drawing the canvas) is on core 1 as
+  well, so the ISR preempts it instead of competing with it. Its core-0 work (TLS, JSON parsing)
+  is light on PSRAM. The weather spike's fetch task wipes a 253 KB PSRAM image (`fillSprite`) and
+  decodes into it on core 0. (Inferred from the pattern of tests, not measured; the single-core
+  first spike never rolled.)
+- **Not the cause (ruled out 2026-10-14):** library versions (now pinned in `platformio.ini`;
+  `qualia` was clean on the same versions); the frame clear (a PSRAM-read-back-free clear didn't
+  help); a `displayResync()` after each new image (didn't help).
+- **Same failure elsewhere:** the Waveshare ESP32-S3-Touch-LCD-5 (800×480 at 16 MHz, octal PSRAM
+  at 80 MHz, 20-line bounce buffers) measured unthrottled bulk PSRAM work glitching up to 3 in 10
+  runs, and 4 KB chunks with a 1 ms delay glitching 0 in 25. Its fix: one mutex for bulk PSRAM
+  jobs, 4 KB chunks, `vTaskDelay(1)` between them, and draw buffers in internal RAM.
+- **Our framework against Espressif's FAQ recommendations** (prebuilt `qio_opi` sdkconfig):
+
+  | Setting | Ours | Recommended |
+  |---|---|---|
+  | `CONFIG_ESP32S3_DATA_CACHE_LINE_*` | 32B | **64B, "required" in bounce-buffer mode, else the screen may drift** |
+  | `CONFIG_SPIRAM_SPEED_*` | 80M | 120M (experimental; limit rises to ~30 MHz pclk) |
+  | `CONFIG_SPIRAM_FETCH_INSTRUCTIONS` / `CONFIG_SPIRAM_RODATA` | off | on, so PSRAM keeps working during flash writes (`CONFIG_SPIRAM_XIP_FROM_PSRAM` is the ESP32-P4 name) |
+  | `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` | on | off if drift persists with Wi-Fi (costs internal RAM we don't have) |
+  | `CONFIG_COMPILER_OPTIMIZATION_*` | SIZE | PERF (faster ISR copy) |
+
+  The FAQ doesn't mention `CONFIG_LCD_RGB_ISR_IRAM_SAFE`, which this section used to name as the
+  fix for flash writes; XIP from PSRAM is Espressif's answer for that.
+- **Plan:**
+  1. Rebuild the framework with `custom_sdkconfig` for this display: 64B data cache line, PERF
+     optimisation, XIP from PSRAM. 120 MHz PSRAM only after checking the module supports it.
+     Test plane mode first (it changes the whole firmware), then the spike. **Done
+     2026-10-15: plane mode runs normally, and the spike ran ~11 min with no roll** (three
+     radar time steps, ~20 range changes, PNGs up to 34 KB, where the roll used to appear
+     from the first frame). TLS internal-RAM minimum rose from 29–36 KB to 61 KB. Which of
+     the three settings fixed it isn't isolated; the 64B line is the one Espressif requires.
+     Still wanted: an overnight soak and a cold start. One frame's copy doubled (37 to 66 ms)
+     while the core-0 task decoded into PSRAM, so step 2 still applies. The rebuild can't include TinyUSB
+     (pioarduino/platform-espressif32#505), so `Serial` moved to the hardware USB-Serial/JTAG
+     port (`ARDUINO_USB_MODE=1`). pioarduino writes the rebuilt libraries over the shared
+     `framework-arduinoespressif32-libs/esp32s3/qio_opi` package, so other projects on this
+     machine that use that package version get them too.
+  2. A rule for all modes: no unthrottled bulk PSRAM work on core 0. Do it on core 1, or in
+     ~4 KB chunks with a 1 ms delay. The weather mode is designed around this.
+  3. Fallbacks if the margin is still too thin: lower pclk (12 MHz shimmered before), larger
+     bounce buffers (no internal RAM to spare next to TLS).
+- **Kept from earlier:** `setup()` calls `displayResync()` on `ARDUINO_EVENT_WIFI_STA_GOT_IP`
+  (Wi-Fi's first connect writes flash); the log prints `panel: scan-out resync`.
+- **Sources:** [ESP-IDF v5.5.5 RGB LCD guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/api-reference/peripherals/lcd/rgb_lcd.html),
+  [ESP-FAQ: LCD](https://docs.espressif.com/projects/esp-faq/en/latest/software-framework/peripherals/lcd.html),
+  [Waveshare ESP32-S3-Touch-LCD-5 issue #1](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-5/issues/1),
+  [ESP-MeteoPlaneRadar](https://github.com/hackra76/ESP-MeteoPlaneRadar).
 
 ### Wi-Fi credentials lost after a hold-UP reset (fixed 2026-10-02)
 

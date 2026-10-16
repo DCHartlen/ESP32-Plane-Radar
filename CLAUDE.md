@@ -62,3 +62,4 @@ Preferences live in separate namespaces: `planeradar` (range preset, miles, runw
 - C++17 (`-std=gnu++17`). Code is split into `include/<area>/*.h` and `src/<area>/*.cpp` under namespaces `services::*`, `ui`, and `ui::radar` / `ui::runway` / `ui::landmark`. File-local state uses anonymous namespaces with an `s_` prefix, and constants use a `k` prefix.
 - Colors are standard RGB565 (`canvas.color565()`); `canvas` stores them in native byte order, which the panel scans out directly. Set its color depth only before `setBuffer` (see `display.cpp`). There's no color inversion or BGR swap on this panel.
 - Keep Arduino_GFX includes inside `hardware/panel.cpp`. Everything else draws with LovyanGFX into `canvas`.
+- Git commits are never to list the coding agent as a co-author

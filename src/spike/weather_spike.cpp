@@ -401,6 +401,37 @@ void setEnabled(bool enabled) {
   s_enabled = enabled;
 }
 
+/** One row of the background, in internal RAM so clearing never reads PSRAM back. */
+alignas(4) uint16_t s_clear_row[config::kDisplayWidth];
+
+/**
+ * Fills the round glass with `color`, as radar_display's clearCanvas does but without its
+ * landmark layer. fillScreen/fillCircle with a colour whose two bytes differ copy PSRAM to
+ * PSRAM, reading back as much as they write; this copies the internal row instead and skips
+ * the corners (~21% of the buffer), which are never seen.
+ */
+void clearRound(uint16_t color) {
+  auto* fb = static_cast<uint16_t*>(canvas.getBuffer());
+  if (s_clear_row[0] != color || s_clear_row[config::kDisplayWidth - 1] != color) {
+    std::fill(std::begin(s_clear_row), std::end(s_clear_row), color);
+  }
+  constexpr int kW = config::kDisplayWidth;
+  constexpr float kRadius = kW * 0.5f;
+  // Spans start and end on 16 px (one 32-byte cache line), which also leaves a few px of
+  // margin outside the glass.
+  constexpr int kAlignPx = 16;
+  static_assert(kW % kAlignPx == 0, "rows must split into whole cache lines");
+  for (int y = 0; y < config::kDisplayHeight; ++y) {
+    const float dy = static_cast<float>(y) + 0.5f - config::kDisplayHeight * 0.5f;
+    const float half_sq = kRadius * kRadius - dy * dy;
+    const int half = half_sq > 0.0f ? static_cast<int>(ceilf(sqrtf(half_sq))) : 0;
+    const int left = std::max(0, (kW / 2 - half) / kAlignPx * kAlignPx);
+    const int right = kW - left;  // symmetric about the centre
+    memcpy(fb + static_cast<size_t>(y) * kW + left, s_clear_row,
+           static_cast<size_t>(right - left) * sizeof(uint16_t));
+  }
+}
+
 /** Copies `image` into canvas at 2x, skipping transparent pixels. */
 void copyImage2x(LGFX_Sprite& image) {
   const auto* src = static_cast<const uint16_t*>(image.getBuffer());
@@ -485,8 +516,8 @@ void logReport(const Report& r) {
 /** Draws a full frame from the cached image; `reason` labels its timing line. */
 void drawFrame(const char* reason) {
   const unsigned long t0 = millis();
-  canvas.fillScreen(TFT_BLACK);
-  canvas.fillCircle(kCenterX, kCenterY, kCenterX, canvas.color565(8, 16, 24));
+  clearRound(canvas.color565(8, 16, 24));
+  const unsigned long clear_ms = millis() - t0;
 
   Report r;
   size_t range = s_range;
@@ -509,8 +540,8 @@ void drawFrame(const char* reason) {
   drawStatus(r, image_time, copy_ms);
   const unsigned long t1 = millis();
   displayPresent();
-  Serial.printf("weather: %s frame: draw %lu ms (copy %lu ms), present %lu ms\n", reason,
-                t1 - t0, copy_ms, millis() - t1);
+  Serial.printf("weather: %s frame: draw %lu ms (clear %lu ms, copy %lu ms), present %lu ms\n",
+                reason, t1 - t0, clear_ms, copy_ms, millis() - t1);
 }
 
 }  // namespace
@@ -576,9 +607,6 @@ void weatherSpikeRun() {
       drawn_publish = published;
       last_draw_ms = millis();
       logReport(r);
-      // The fetch and decode can slip the panel's scan-out (docs/qualia-port-plan.md, frame
-      // roll); re-align it at the next VSYNC. Logs "panel: scan-out resync".
-      displayResync();
       drawFrame("fetch");
     } else if (published != 0 && millis() - last_draw_ms >= kRedrawMs) {
       last_draw_ms = millis();

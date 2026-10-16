@@ -265,6 +265,11 @@ void ensureWifiManager() {
   if (s_wm_configured) {
     return;
   }
+  // No modem sleep on any path, including the portal's own connect (prepareSta() only runs
+  // for saved networks). With it, replies wait for the next beacon and TLS connects overrun
+  // the ADS-B fetch's 200 ms connect attempts. The core keeps this and applies it whenever
+  // the station starts.
+  WiFi.setSleep(WIFI_PS_NONE);
   s_wm.setConfigPortalTimeout(config::kWifiPortalTimeoutSec);
   s_wm.setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                            IPAddress(255, 255, 255, 0));
