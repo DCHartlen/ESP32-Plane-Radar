@@ -215,14 +215,14 @@ The board is ESP32-S3 N16R8: 16 MB QIO flash and 8 MB OPI PSRAM (`memory_type = 
   native 25 km image on 74% of pixels: the same cells, with block edges up to half a pixel
   (0.4 km) off, because 0.80 km pixels don't line up with 1 km cells. No features lost.
 - **History:** the last 10 steps (one hour) as PNGs in PSRAM (≤35 KB each), fetched newest
-  first, then backfilled. Hold DOWN replays them oldest first at 400 ms a frame, holds the last
+  first, then backfilled. Hold DOWN replays them oldest first at 600 ms a frame, holds the last
   1.5 s, then shows the live image.
 - **Core-0 PSRAM rule:** the fetch task only downloads; the loop task (core 1) decodes. This
   replaces the agreed "pause every 16 lines" throttle: decoding where the panel ISR runs can't
   overlap the refill at all, and needs no tuning. The decoder's 11 KB state is on the heap, so
   the 8 KB loop stack is fine; check `loop stack min free` in the log after a replay.
 - **Screen:** blue-grey grid on a greyer navy (the spike's palette), landmarks under the rain,
-  runways, rings and labels over it, the image's age above the clock (yellow past 20 min).
+  runways, rings and labels over it, the image's age under the clock (yellow past 20 min).
 - **Landmarks:** `build_landmarks.py` now bakes 150 km around each site (was 75), which
   reaches the screen edge at 100 km (~144 km); the layer's view box is the screen, not the
   outer ring. Regenerated 2026-10-15 for the radar centre.

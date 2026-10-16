@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <new>
 
 #include "config.h"
 #include "hardware/display.h"
@@ -95,115 +96,88 @@ void drawGridRing(int cx, int cy, int r, uint16_t color) {
 }
 
 /**
- * The clock's outline: the text drawn at 12 points around a circle, on a transparent
- * background (8 left notches at the corners once it got thicker).
+ * An outline: the text drawn at 12 points around a circle of radius outline_px, on a
+ * transparent background (8 left notches at the corners once the clock's got thicker).
  */
-void drawStringOutline(lgfx::LGFXBase& gfx, const char* text, int x, int y, uint16_t color) {
+void drawStringOutline(lgfx::LGFXBase& gfx, const char* text, int x, int y, uint16_t color,
+                       float outline_px) {
   constexpr int kSteps = 12;
   constexpr float kStepRad = 6.2831853f / kSteps;
-  constexpr float o = kClockOutlinePx;
   gfx.setTextColor(color);
   for (int i = 0; i < kSteps; ++i) {
-    const int dx = static_cast<int>(lroundf(cosf(i * kStepRad) * o));
-    const int dy = static_cast<int>(lroundf(sinf(i * kStepRad) * o));
+    const int dx = static_cast<int>(lroundf(cosf(i * kStepRad) * outline_px));
+    const int dy = static_cast<int>(lroundf(sinf(i * kStepRad) * outline_px));
     gfx.drawString(text, x + dx, y + dy);
   }
 }
 
-enum class ClockPass : uint8_t { Outline, Text };
-
-/** One pass of the clock (time and suffix) into gfx, whose top-left is screen (ox, oy). */
-void drawClockPass(lgfx::LGFXBase& gfx, const ClockLayout& clock, int ox, int oy,
-                   ClockPass pass, uint16_t color) {
-  gfx.setTextDatum(textdatum_t::baseline_left);
-  const int y = clock.baseline_y - oy;
-  const auto part = [&](const char* text, int x, int height_px) {
-    displayFontApply(gfx, height_px);
-    if (pass == ClockPass::Outline) {
-      drawStringOutline(gfx, text, x, y, color);
-    } else {
-      gfx.setTextColor(color);
-      gfx.drawString(text, x, y);
-    }
-  };
-  part(clock.hhmm, clock.left_x - ox, kClockLabelHeightPx);
-  if (clock.suffix_w > 0) {
-    part(clock.suffix, clock.left_x + clock.time_w + clock.gap - ox, kAircraftTagLabelHeightPx);
-  }
-}
+enum class TextPass : uint8_t { Outline, Text };
 
 /**
- * The clock, rendered once per minute: two bytes per pixel, its alpha and how much of the
- * white text shows (black outline over the background, then white text). Blending this
- * costs a few ms, where drawing the 13 transparent anti-aliased strings cost ~60.
+ * Outlined text rendered once and blended into each frame: two bytes per pixel, its alpha and
+ * how much of the text shows. On screen that's bg * (1 - alpha) + color * text: a black
+ * outline under the text. Blending costs ~1 ms for a label, where drawing the 13 anti-aliased
+ * strings an outline takes cost ~5 ms (~60 for the clock).
  */
-struct ClockImage {
-  char hhmm[8];
-  char suffix[4];
-  int x;
-  int y;
-  int w;
-  int h;
-  uint8_t* px;  // PSRAM, w * h * 2
+struct TextImage {
+  int x = 0;
+  int y = 0;
+  int w = 0;
+  int h = 0;
+  uint8_t* px = nullptr;  // PSRAM, w * h * 2
 };
-ClockImage s_clock_image{};
-LGFX_Sprite s_clock_sprite;
+
+/** Scratch surface the passes are drawn into, white on black. */
+LGFX_Sprite s_scratch;
 
 /**
  * A pixel's green level in the scratch sprite, 0–255: the coverage of what was drawn white
  * on black. The sprite stores RGB565 byte-swapped: RRRRRGGG GGGBBBBB.
  */
-uint8_t clockCoverage(int x, int y) {
-  const uint8_t* p = static_cast<const uint8_t*>(s_clock_sprite.getBuffer()) +
-                     (static_cast<size_t>(y) * s_clock_sprite.width() + x) * 2;
+uint8_t scratchCoverage(int x, int y) {
+  const uint8_t* p = static_cast<const uint8_t*>(s_scratch.getBuffer()) +
+                     (static_cast<size_t>(y) * s_scratch.width() + x) * 2;
   const uint32_t g6 = ((p[0] & 0x07u) << 3) | (p[1] >> 5);
   return static_cast<uint8_t>((g6 << 2) | (g6 >> 4));
 }
 
-/** Renders the clock into s_clock_image if the text changed; false if out of memory. */
-bool updateClockImage(const ClockLayout& clock) {
-  ClockImage& img = s_clock_image;
-  if (img.px != nullptr && strcmp(img.hhmm, clock.hhmm) == 0 &&
-      strcmp(img.suffix, clock.suffix) == 0) {
-    return true;
-  }
-  heap_caps_free(img.px);
-  img = {};
+void freeTextImage(TextImage* img) {
+  heap_caps_free(img->px);
+  *img = TextImage{};
+}
 
-  // Generous box: the outline, and glyphs that reach past their measured width or the
-  // line height. Trimmed to the drawn pixels below.
-  const int pad = kClockOutlinePx + px(2);
-  const int ox = clock.left_x - pad;
-  const int oy = clock.baseline_y - kClockLabelHeightPx - pad;
-  const int w = clock.time_w + clock.gap + clock.suffix_w + pad * 2;
-  const int h = kClockLabelHeightPx * 3 / 2 + pad * 2;
-
-  s_clock_sprite.setPsram(true);
-  s_clock_sprite.setColorDepth(16);
-  if (s_clock_sprite.createSprite(w, h) == nullptr) {
+/**
+ * Renders into *out the text that draw(gfx, ox, oy, pass) puts in a w x h box whose top-left
+ * is screen (ox, oy), trimmed to the pixels it covers. False if out of memory.
+ */
+template <typename Draw>
+bool renderTextImage(int ox, int oy, int w, int h, Draw draw, TextImage* out) {
+  freeTextImage(out);
+  s_scratch.setPsram(true);
+  s_scratch.setColorDepth(16);
+  if (s_scratch.createSprite(w, h) == nullptr) {
     return false;
   }
-  s_clock_sprite.setTextWrap(false);
+  s_scratch.setTextWrap(false);
   uint8_t* full = static_cast<uint8_t*>(
       heap_caps_malloc(static_cast<size_t>(w) * h * 2, MALLOC_CAP_SPIRAM));
   if (full == nullptr) {
-    s_clock_sprite.deleteSprite();
+    s_scratch.deleteSprite();
     return false;
   }
 
   // Coverage of the outline and of the text, each drawn white on black.
-  s_clock_sprite.fillSprite(TFT_BLACK);
-  drawClockPass(s_clock_sprite, clock, ox, oy, ClockPass::Outline, TFT_WHITE);
+  s_scratch.fillSprite(TFT_BLACK);
+  draw(s_scratch, ox, oy, TextPass::Outline);
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {
-      full[(y * w + x) * 2] = clockCoverage(x, y);
+      full[(y * w + x) * 2] = scratchCoverage(x, y);
     }
   }
-  s_clock_sprite.fillSprite(TFT_BLACK);
-  drawClockPass(s_clock_sprite, clock, ox, oy, ClockPass::Text, TFT_WHITE);
+  s_scratch.fillSprite(TFT_BLACK);
+  draw(s_scratch, ox, oy, TextPass::Text);
 
-  // On screen the result is bg * (1 - outline) * (1 - text) + white * text, so the alpha
-  // is 1 - (1 - outline) * (1 - text).
+  // alpha = 1 - (1 - outline) * (1 - text).
   int min_x = w;
   int min_y = h;
   int max_x = -1;
@@ -211,7 +185,7 @@ bool updateClockImage(const ClockLayout& clock) {
   for (int y = 0; y < h; ++y) {
     for (int x = 0; x < w; ++x) {
       uint8_t* p = &full[(y * w + x) * 2];
-      const uint32_t text = clockCoverage(x, y);
+      const uint32_t text = scratchCoverage(x, y);
       const uint32_t outline = p[0];
       p[0] = static_cast<uint8_t>(255 - ((255 - outline) * (255 - text) + 127) / 255);
       p[1] = static_cast<uint8_t>(text);
@@ -223,13 +197,14 @@ bool updateClockImage(const ClockLayout& clock) {
       }
     }
   }
-  s_clock_sprite.deleteSprite();
+  s_scratch.deleteSprite();
 
   if (max_x < 0) {  // nothing drawn; keep an empty image so this isn't redone every frame
     max_x = min_x = 0;
     max_y = min_y = 0;
     full[0] = 0;
   }
+  TextImage img;
   img.w = max_x - min_x + 1;
   img.h = max_y - min_y + 1;
   img.x = ox + min_x;
@@ -238,7 +213,6 @@ bool updateClockImage(const ClockLayout& clock) {
       heap_caps_malloc(static_cast<size_t>(img.w) * img.h * 2, MALLOC_CAP_SPIRAM));
   if (img.px == nullptr) {
     heap_caps_free(full);
-    img = {};
     return false;
   }
   for (int y = 0; y < img.h; ++y) {
@@ -246,18 +220,19 @@ bool updateClockImage(const ClockLayout& clock) {
            static_cast<size_t>(img.w) * 2);
   }
   heap_caps_free(full);
-  snprintf(img.hhmm, sizeof(img.hhmm), "%s", clock.hhmm);
-  snprintf(img.suffix, sizeof(img.suffix), "%s", clock.suffix);
+  *out = img;
   return true;
 }
 
-/** Blends s_clock_image straight into the canvas buffer (RGB565, native byte order). */
-void blendClockImage() {
-  const ClockImage& img = s_clock_image;
+/** Blends img straight into the canvas buffer (RGB565, native byte order), text in `color`. */
+void blendTextImage(const TextImage& img, uint16_t color) {
   uint16_t* fb = static_cast<uint16_t*>(canvas.getBuffer());
   if (fb == nullptr || img.px == nullptr) {
     return;
   }
+  const uint32_t cr = color >> 11;
+  const uint32_t cg = (color >> 5) & 0x3F;
+  const uint32_t cb = color & 0x1F;
   for (int y = 0; y < img.h; ++y) {
     const int sy = img.y + y;
     if (sy < 0 || sy >= kFbH) {
@@ -274,12 +249,163 @@ void blendClockImage() {
       const uint32_t text = src[1];
       const uint32_t keep = 255 - alpha;
       const uint32_t dst = fb[index];
-      const uint32_t r = ((dst >> 11) * keep + 31 * text + 127) / 255;
-      const uint32_t g = (((dst >> 5) & 0x3F) * keep + 63 * text + 127) / 255;
-      const uint32_t b = ((dst & 0x1F) * keep + 31 * text + 127) / 255;
+      const uint32_t r = ((dst >> 11) * keep + cr * text + 127) / 255;
+      const uint32_t g = (((dst >> 5) & 0x3F) * keep + cg * text + 127) / 255;
+      const uint32_t b = ((dst & 0x1F) * keep + cb * text + 127) / 255;
       fb[index] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
     }
   }
+}
+
+/** One pass of the clock (time and suffix) into gfx, whose top-left is screen (ox, oy). */
+void drawClockPass(lgfx::LGFXBase& gfx, const ClockLayout& clock, int ox, int oy,
+                   TextPass pass, uint16_t color) {
+  gfx.setTextDatum(textdatum_t::baseline_left);
+  const int y = clock.baseline_y - oy;
+  const auto part = [&](const char* text, int x, int height_px) {
+    displayFontApply(gfx, height_px);
+    if (pass == TextPass::Outline) {
+      drawStringOutline(gfx, text, x, y, color, kClockOutlinePx);
+    } else {
+      gfx.setTextColor(color);
+      gfx.drawString(text, x, y);
+    }
+  };
+  part(clock.hhmm, clock.left_x - ox, kClockLabelHeightPx);
+  if (clock.suffix_w > 0) {
+    part(clock.suffix, clock.left_x + clock.time_w + clock.gap - ox, kAircraftTagLabelHeightPx);
+  }
+}
+
+/** The clock's image and the text it shows; re-rendered when the minute changes. */
+struct ClockImage {
+  char hhmm[8] = "";
+  char suffix[4] = "";
+  bool valid = false;
+  TextImage img;
+};
+ClockImage s_clock_image;
+
+/** Renders the clock into s_clock_image if the text changed; false if out of memory. */
+bool updateClockImage(const ClockLayout& clock) {
+  ClockImage& c = s_clock_image;
+  if (c.valid && strcmp(c.hhmm, clock.hhmm) == 0 && strcmp(c.suffix, clock.suffix) == 0) {
+    return true;
+  }
+  c.valid = false;
+  // Generous box: the outline, and glyphs that reach past their measured width or the
+  // line height. Trimmed to the drawn pixels.
+  const int pad = kClockOutlinePx + px(2);
+  const int ox = clock.left_x - pad;
+  const int oy = clock.baseline_y - kClockLabelHeightPx - pad;
+  const int w = clock.time_w + clock.gap + clock.suffix_w + pad * 2;
+  const int h = kClockLabelHeightPx * 3 / 2 + pad * 2;
+  const auto draw = [&clock](lgfx::LGFXBase& gfx, int x0, int y0, TextPass pass) {
+    drawClockPass(gfx, clock, x0, y0, pass, TFT_WHITE);
+  };
+  if (!renderTextImage(ox, oy, w, h, draw, &c.img)) {
+    return false;
+  }
+  snprintf(c.hhmm, sizeof(c.hhmm), "%s", clock.hhmm);
+  snprintf(c.suffix, sizeof(c.suffix), "%s", clock.suffix);
+  c.valid = true;
+  return true;
+}
+
+/**
+ * Outlined labels, cached by text, size and placement. Most never change (cardinals) or
+ * change with a zoom (scale, airports) or once a minute (the radar's age); when the cache is
+ * full the one unused longest goes.
+ */
+struct LabelImage {
+  char text[24] = "";
+  int height_px = 0;
+  int x = 0;
+  int y = 0;
+  textdatum_t datum = textdatum_t::top_left;
+  bool valid = false;
+  uint32_t last_frame = 0;
+  TextImage img;
+};
+constexpr size_t kLabelCacheSize = 48;
+/** In PSRAM (~3 KB that internal RAM can't spare beside TLS); allocated on first use. */
+LabelImage* s_labels = nullptr;
+
+bool ensureLabelCache() {
+  if (s_labels != nullptr) {
+    return true;
+  }
+  void* mem = heap_caps_malloc(sizeof(LabelImage) * kLabelCacheSize, MALLOC_CAP_SPIRAM);
+  if (mem == nullptr) {
+    return false;
+  }
+  s_labels = new (mem) LabelImage[kLabelCacheSize];
+  return true;
+}
+/** Counts frames (applyPalette), for the cache's least-recently-used choice. */
+uint32_t s_frame = 0;
+
+/** Top-left of a text box of w x h placed at (x, y) by datum. */
+void boxTopLeft(textdatum_t datum, int x, int y, int w, int h, int* left, int* top) {
+  const int col = datum & 3;         // 0 left, 1 centre, 2 right
+  const int row = (datum >> 2) & 3;  // 0 top, 1 middle, 2 bottom
+  *left = col == 1 ? x - w / 2 : col == 2 ? x - w : x;
+  *top = row == 1 ? y - h / 2 : row == 2 ? y - h : y;
+}
+
+LabelImage* findLabel(const char* text, int height_px, int x, int y, textdatum_t datum) {
+  for (size_t i = 0; i < kLabelCacheSize; ++i) {
+    LabelImage& label = s_labels[i];
+    if (label.valid && label.height_px == height_px && label.x == x && label.y == y &&
+        label.datum == datum && strcmp(label.text, text) == 0) {
+      return &label;
+    }
+  }
+  return nullptr;
+}
+
+LabelImage* renderLabel(const char* text, int height_px, int x, int y, textdatum_t datum) {
+  LabelImage* slot = &s_labels[0];
+  for (size_t i = 0; i < kLabelCacheSize; ++i) {
+    LabelImage& label = s_labels[i];
+    if (!label.valid) {
+      slot = &label;
+      break;
+    }
+    if (label.last_frame < slot->last_frame) {
+      slot = &label;
+    }
+  }
+  slot->valid = false;
+
+  displayFontApply(canvas, height_px);
+  const int tw = canvas.textWidth(text);
+  const int th = canvas.fontHeight();
+  int left = 0;
+  int top = 0;
+  boxTopLeft(datum, x, y, tw, th, &left, &top);
+  const int pad = static_cast<int>(ceilf(kLabelOutlinePx)) + px(2);
+  const auto draw = [text, height_px, left, top](lgfx::LGFXBase& gfx, int x0, int y0,
+                                                 TextPass pass) {
+    displayFontApply(gfx, height_px);
+    gfx.setTextDatum(textdatum_t::top_left);
+    if (pass == TextPass::Outline) {
+      drawStringOutline(gfx, text, left - x0, top - y0, TFT_WHITE, kLabelOutlinePx);
+    } else {
+      gfx.setTextColor(TFT_WHITE);
+      gfx.drawString(text, left - x0, top - y0);
+    }
+  };
+  if (!renderTextImage(left - pad, top - pad, tw + pad * 2, th + pad * 2, draw, &slot->img)) {
+    return nullptr;
+  }
+  snprintf(slot->text, sizeof(slot->text), "%s", text);
+  slot->height_px = height_px;
+  slot->x = x;
+  slot->y = y;
+  slot->datum = datum;
+  slot->valid = true;
+  return slot;
 }
 
 /** One row of the clear colour, in internal RAM so clearing never reads PSRAM back. */
@@ -288,6 +414,7 @@ alignas(4) uint16_t s_clear_row[config::kDisplayWidth];
 }  // namespace
 
 void applyPalette() {
+  ++s_frame;
   if (mode() == Mode::Weather) {
     s_background_rgb = {kWeatherBgR, kWeatherBgG, kWeatherBgB};
     s_grid_rgb = {kWeatherGridR, kWeatherGridG, kWeatherGridB};
@@ -404,22 +531,17 @@ void drawCrosshairs() {
 void drawHome() { drawHomeMarker(kCenterX, kCenterY, kColorCenter, kColorBackground); }
 
 void drawCardinalLabels() {
-  applyCardinalStyle();
-  canvas.setTextColor(kColorLabel, kColorBackground);
   for (const CardinalLabel& label : kCardinalLabels) {
-    canvas.setTextDatum(label.datum);
-    canvas.drawString(label.text, label.x, label.y);
+    drawOutlinedText(label.text, kCardinalLabelHeightPx, label.x, label.y, label.datum,
+                     kColorLabel);
   }
 }
 
 void drawScaleLabel() {
   char text[12];
   formatCurrentRing3Label(text, sizeof(text));
-  const ScreenRect box = scaleLabelRect(text, scaleLabelAnchorX(), kCenterY);
-  canvas.fillRect(box.left, box.top, box.w, box.h, kColorBackground);
-  canvas.setTextDatum(textdatum_t::middle_right);
-  canvas.setTextColor(kColorGrid, kColorBackground);
-  canvas.drawString(text, scaleLabelAnchorX(), kCenterY);
+  drawOutlinedText(text, kScaleLabelHeightPx, scaleLabelAnchorX(), kCenterY,
+                   textdatum_t::middle_right, kColorGrid);
 }
 
 size_t cardinalLabelCount() { return sizeof(kCardinalLabels) / sizeof(kCardinalLabels[0]); }
@@ -499,12 +621,33 @@ bool layoutClock(ClockLayout* clock) {
 
 void drawClock(const ClockLayout& clock) {
   if (updateClockImage(clock)) {
-    blendClockImage();
+    blendTextImage(s_clock_image.img, kColorLabel);
     return;
   }
   // Out of PSRAM: draw it straight onto the canvas, the slow way.
-  drawClockPass(canvas, clock, 0, 0, ClockPass::Outline, config::kColorBlack);
-  drawClockPass(canvas, clock, 0, 0, ClockPass::Text, kColorLabel);
+  drawClockPass(canvas, clock, 0, 0, TextPass::Outline, config::kColorBlack);
+  drawClockPass(canvas, clock, 0, 0, TextPass::Text, kColorLabel);
+}
+
+void drawOutlinedText(const char* text, int height_px, int x, int y, textdatum_t datum,
+                      uint16_t color) {
+  LabelImage* label = nullptr;
+  if (strlen(text) < sizeof(LabelImage::text) && ensureLabelCache()) {
+    label = findLabel(text, height_px, x, y, datum);
+    if (label == nullptr) {
+      label = renderLabel(text, height_px, x, y, datum);
+    }
+  }
+  if (label == nullptr) {
+    // Too long to cache, or out of PSRAM: plain text on the background, the old way.
+    displayFontApply(canvas, height_px);
+    canvas.setTextDatum(datum);
+    canvas.setTextColor(color, kColorBackground);
+    canvas.drawString(text, x, y);
+    return;
+  }
+  label->last_frame = s_frame;
+  blendTextImage(label->img, color);
 }
 
 }  // namespace ui::radar

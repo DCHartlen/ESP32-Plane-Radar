@@ -184,6 +184,11 @@ constexpr float kClockCenterRingFraction = 0.66f;
 constexpr int kClockLabelHeightPx = px(30);
 /** Black outline thickness around the clock text. */
 constexpr int kClockOutlinePx = px(2.5f);
+/**
+ * Black outline around the labels (cardinals, scale, airports, the radar's age): thinner
+ * than the clock's, for text about half its height.
+ */
+constexpr float kLabelOutlinePx = pxF(1.5f);
 /** Gap between the time and its AM/PM suffix. */
 constexpr int kClockSuffixGapPx = px(2);
 

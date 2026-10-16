@@ -4,7 +4,7 @@ namespace ui {
 
 /**
  * Weather mode's frame: the newest radar image from services::weather under the grid, the
- * runways and the clock, with the image's age above the clock. The image is decoded here, on
+ * runways and the clock, with the image's age under the clock. The image is decoded here, on
  * the loop task (core 1), whenever a newer one arrives. `log` prints the frame timing.
  */
 void weatherDisplayDraw(bool log = true);

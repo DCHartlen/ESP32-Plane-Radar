@@ -131,7 +131,7 @@ A single failed fetch doesn't trigger a message.
 - Source: Environment Canada's [GeoMet](https://eccc-msc.github.io/open-data/msc-geomet/readme_en/) WMS, layer `RADAR_1KM_RRAI` (North American rain-rate composite, Canadian and US radars, 1 km cells, a new image every 6 min). No key needed.
 - Ranges: 25, 50 and 100 km on ring 3 (`kWeatherRangePresets`). Every image is fetched once at the 100 km extent; the narrower ranges show its centre at 2× and 4× the scale, so changing range needs no download and the replay works at every range.
 - The last 10 images (one hour) are kept in PSRAM. **Hold DOWN** plays them oldest to newest, then returns to the live image.
-- Above the clock: the image's age (`Radar 6 min ago`), in yellow once it's over 20 min old. During a replay it shows each image's time.
+- Under the clock: the image's age (`Radar 6 min ago`), in yellow once it's over 20 min old. During a replay it shows each image's time.
 - Same runways, landmarks, rings and clock as plane mode, on a blue-grey grid.
 - Outside the radar's coverage (roughly lat 17–67°, lon −170 to −50°) it says "No radar coverage".
 

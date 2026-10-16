@@ -1,5 +1,7 @@
 #pragma once
 
+#include <LovyanGFX.hpp>
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +45,14 @@ void drawHome();
 void drawCardinalLabels();
 /** The ring-3 distance on the east spoke, on a background box. */
 void drawScaleLabel();
+
+/**
+ * Text with a dark outline all round, like the clock, blended over whatever is under it (no
+ * background box). Rendered once per text, size and placement and cached, so a label that
+ * doesn't change costs ~1 ms a frame.
+ */
+void drawOutlinedText(const char* text, int height_px, int x, int y, textdatum_t datum,
+                      uint16_t color);
 
 /** Boxes of the cardinal letters and the scale label, for aircraft tag placement. */
 size_t cardinalLabelCount();

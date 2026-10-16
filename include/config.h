@@ -146,7 +146,7 @@ constexpr size_t kWeatherHistoryFrames = 10;
 /** The image age label turns to the alert colour past this. */
 constexpr unsigned long kWeatherStaleAfterMs = 20UL * 60UL * 1000UL;
 /** Replay: time each frame stays up (decode and draw included), and the hold on the last. */
-constexpr unsigned long kWeatherReplayFrameMs = 400;
+constexpr unsigned long kWeatherReplayFrameMs = 600;
 constexpr unsigned long kWeatherReplayLastFrameMs = 1500;
 
 // --- Clock ---

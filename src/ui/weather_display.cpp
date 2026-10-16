@@ -155,25 +155,25 @@ void copyScaled(const LGFX_Sprite& image, int scale) {
   }
 }
 
-/** A line of text on a background box, centred on (kCenterX, center_y). */
+/** The age label's line height: the scale label's size, smaller than the tags. */
+constexpr int kLabelHeightPx = radar::kCardinalLabelHeightPx - radar::kScaleBelowCardinalPx;
+
+/** A line of outlined text centred on (kCenterX, center_y). */
 void drawLabel(const char* text, uint16_t color, int center_y) {
-  displayFontApply(canvas, radar::kAircraftTagLabelHeightPx);
-  constexpr int kPadX = px(3);
-  constexpr int kPadY = px(1);
-  const int w = canvas.textWidth(text) + kPadX * 2;
-  const int h = canvas.fontHeight() + kPadY * 2;
-  canvas.fillRect(radar::kCenterX - w / 2, center_y - h / 2, w, h, radar::kColorBackground);
-  canvas.setTextDatum(textdatum_t::middle_center);
-  canvas.setTextColor(color, radar::kColorBackground);
-  canvas.drawString(text, radar::kCenterX, center_y);
+  radar::drawOutlinedText(text, kLabelHeightPx, radar::kCenterX, center_y,
+                          textdatum_t::middle_center, color);
 }
 
-/** The label sits just above the clock on the south spoke. */
+/**
+ * The label sits just under the clock on the south spoke. The clock's digits reach about
+ * 0.32 line heights below its centre, plus the outline (radar_frame's layoutClock).
+ */
 int labelCenterY() {
   const int clock_center_y =
       radar::kCenterY + static_cast<int>(radar::kGridOuterRadius * radar::kClockCenterRingFraction);
-  return clock_center_y - radar::kClockLabelHeightPx / 2 - radar::kAircraftTagLabelHeightPx / 2 -
-         px(2);
+  const int clock_bottom =
+      clock_center_y + radar::kClockLabelHeightPx * 32 / 100 + radar::kClockOutlinePx;
+  return clock_bottom + px(2) + kLabelHeightPx / 2;
 }
 
 /** Local HH:MM of a UTC time, or HH:MMZ before the clock is synced. */
