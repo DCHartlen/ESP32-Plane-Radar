@@ -10,6 +10,7 @@
 #include "config.h"
 #include "data/landmarks.h"
 #include "services/radar_location.h"
+#include "ui/radar_frame.h"
 #include "ui/radar_geometry.h"
 #include "ui/radar_range.h"
 #include "ui/radar_theme.h"
@@ -27,7 +28,8 @@ constexpr float kKmPerDeg = 111.0f;
 constexpr float kDegToRad = 3.14159265f / 180.0f;
 /**
  * Points closer than this to the last drawn one are skipped, so zoomed-out ranges don't
- * pay for detail they can't show (OSM shores have a point every few metres).
+ * pay for detail they can't show (OSM shores have a point every few metres). Rivers skip
+ * more at wide ranges (kRiverFarMinSegmentPx).
  */
 constexpr float kMinSegmentPx = 1.5f;
 
@@ -70,23 +72,38 @@ struct LineStyle {
   float half_width;
   uint16_t color;
   bool dashed;
+  float min_segment_px;
 };
+
+/** How far the current range is into the river fade: 0 up close, 1 at kRiverFadeFarKm. */
+float riverFadeAmount() {
+  const float t = (radar::rangeCurrent().outer_km - radar::kRiverFadeNearKm) /
+                  (radar::kRiverFadeFarKm - radar::kRiverFadeNearKm);
+  return std::clamp(t, 0.0f, 1.0f);
+}
 
 LineStyle styleFor(Kind kind) {
   switch (kind) {
-    case Kind::River:
-      return {radar::kRiverLineHalfWidth,
-              s_layer.color565(radar::kRiverR, radar::kRiverG, radar::kRiverB), false};
+    case Kind::River: {
+      const float t = riverFadeAmount();
+      const radar::Rgb rgb = radar::mixRgb({radar::kRiverR, radar::kRiverG, radar::kRiverB},
+                                           radar::backgroundRgb(), t * radar::kRiverFarFade);
+      return {radar::kRiverLineHalfWidth, s_layer.color565(rgb.r, rgb.g, rgb.b), false,
+              kMinSegmentPx + t * (radar::kRiverFarMinSegmentPx - kMinSegmentPx)};
+    }
     case Kind::Island:
       return {radar::kIslandLineHalfWidth,
-              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false};
+              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false,
+              kMinSegmentPx};
     case Kind::Shore:
       return {radar::kShoreLineHalfWidth,
-              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false};
+              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false,
+              kMinSegmentPx};
     case Kind::Border:
     default:
       return {radar::kBorderLineHalfWidth,
-              s_layer.color565(radar::kBorderR, radar::kBorderG, radar::kBorderB), true};
+              s_layer.color565(radar::kBorderR, radar::kBorderG, radar::kBorderB), true,
+              kMinSegmentPx};
   }
 }
 
@@ -296,7 +313,8 @@ void drawChunk(const data::landmarks::Chunk& chunk, const LineStyle& style, floa
     float y1 = 0.0f;
     project(lat, lon, &x1, &y1);
     const bool last = i + 1 == chunk.point_count;
-    if (!last && fabsf(x1 - x0) < kMinSegmentPx && fabsf(y1 - y0) < kMinSegmentPx) {
+    if (!last && fabsf(x1 - x0) < style.min_segment_px &&
+        fabsf(y1 - y0) < style.min_segment_px) {
       continue;
     }
     if (style.dashed) {

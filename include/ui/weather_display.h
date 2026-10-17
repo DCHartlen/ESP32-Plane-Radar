@@ -10,6 +10,12 @@ namespace ui {
 void weatherDisplayDraw(bool log = true);
 
 /**
+ * The weather task now has something the live frame would show differently: a newer image, or
+ * a new reason for having none. Older images arriving (the backfill) don't count.
+ */
+bool weatherDisplayLiveChanged();
+
+/**
  * Starts the replay of the held radar images, oldest first; false (and nothing changes) with
  * fewer than two. Each step of it is drawn by weatherDisplayReplayStep().
  */

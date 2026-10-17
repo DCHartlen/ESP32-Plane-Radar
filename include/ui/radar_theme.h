@@ -135,13 +135,31 @@ constexpr uint8_t kRunwayLabelR = 110;
 constexpr uint8_t kRunwayLabelG = 210;
 constexpr uint8_t kRunwayLabelB = 230;
 
-/** Landmark lines: shores and islands, rivers (dimmer), and the border. */
+/**
+ * Landmark lines: shores and islands, rivers, and the border. Rivers are a dim, greyed
+ * steel blue, so the saturated blue reads as a lake shore and the two don't blur together.
+ */
 constexpr uint8_t kShoreR = 48;
 constexpr uint8_t kShoreG = 100;
 constexpr uint8_t kShoreB = 196;
-constexpr uint8_t kRiverR = 40;
-constexpr uint8_t kRiverG = 82;
-constexpr uint8_t kRiverB = 160;
+constexpr uint8_t kRiverR = 62;
+constexpr uint8_t kRiverG = 86;
+constexpr uint8_t kRiverB = 124;
+/**
+ * Rivers fade toward the background and lose detail as the range widens: none of either up
+ * to kRiverFadeNearKm (outer ring), the full amount from kRiverFadeFarKm, linear between.
+ * At the full amount the colour is kRiverFarFade of the way to the background, and points
+ * closer than kRiverFarMinSegmentPx to the last drawn one are skipped (meanders smooth out).
+ */
+constexpr float kRiverFadeNearKm = 34.0f;
+constexpr float kRiverFadeFarKm = 133.0f;
+constexpr float kRiverFarFade = 0.5f;
+constexpr float kRiverFarMinSegmentPx = pxF(1.4f);
+/**
+ * In weather mode the rain is drawn over the landmark lines, and the lines are blended back
+ * over it at this alpha (0-255), so they show through the rain.
+ */
+constexpr uint8_t kLandmarkOverRainAlpha = 110;
 constexpr uint8_t kBorderR = 150;
 constexpr uint8_t kBorderG = 92;
 constexpr uint8_t kBorderB = 150;

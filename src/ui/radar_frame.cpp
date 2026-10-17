@@ -413,6 +413,8 @@ alignas(4) uint16_t s_clear_row[config::kDisplayWidth];
 
 }  // namespace
 
+Rgb backgroundRgb() { return s_background_rgb; }
+
 void applyPalette() {
   ++s_frame;
   if (mode() == Mode::Weather) {

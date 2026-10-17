@@ -372,9 +372,16 @@ void loop() {
       if (ui::weatherDisplayReplaying()) {
         // New images and the clock wait until the replay ends; it draws the live frame then.
         ui::weatherDisplayReplayStep();
-      } else if (services::weather::publishCount() != g_drawn_weather_publish) {
-        drawRadar(true);
-        logInternalHeap("");
+      } else if (const uint32_t published = services::weather::publishCount();
+                 published != g_drawn_weather_publish) {
+        // Read the count before the status: a publish in between gets looked at next pass.
+        if (ui::weatherDisplayLiveChanged()) {
+          drawRadar(true);
+          logInternalHeap("");
+        } else {
+          // Only older images (the backfill): the screen would look the same.
+          g_drawn_weather_publish = published;
+        }
       } else if (minute != g_drawn_minute) {
         // The clock and the image's age.
         drawRadar(false);

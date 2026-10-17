@@ -31,6 +31,8 @@ inline Rgb mixRgb(const Rgb& a, const Rgb& b, float t) {
 
 /** Sets the kColor* values for the current mode. Call at the start of every frame. */
 void applyPalette();
+/** The current mode's background (kColorBackground) as RGB, for colours mixed toward it. */
+Rgb backgroundRgb();
 
 /**
  * Clears the round glass to the background, with the landmark lines on it. Brings the
