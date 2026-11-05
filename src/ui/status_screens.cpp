@@ -34,6 +34,8 @@ constexpr float kEmphasisHeight = 18.0f;
 constexpr float kBodyHeight = 17.0f;
 constexpr float kNoteHeight = 16.0f;
 constexpr float kConnectingDetailHeight = 15.0f;
+/** The reset countdown digit: the large font's own size (66 px), so it isn't scaled. */
+constexpr float kCountdownHeight = 33.0f;
 
 struct TextLine {
   const char* text;
@@ -165,8 +167,21 @@ void statusScreenConnectFailed() {
       {"Could not connect", kTitleHeight},
       {"Check Wi-Fi password", kNoteHeight},
       {"and signal strength.", kNoteHeight},
-      {"Hold UP 3 sec", kNoteHeight},
+      {"Hold UP + DOWN 3 sec", kNoteHeight},
       {"to reset Wi-Fi", kNoteHeight},
+  };
+  drawTextBlock(config::kColorYellow, config::kTextOnYellow, lines,
+                sizeof(lines) / sizeof(lines[0]));
+}
+
+void statusScreenResetCountdown(int seconds_left) {
+  char count[8];
+  snprintf(count, sizeof(count), "%d", seconds_left);
+  const TextLine lines[] = {
+      {"Reset all settings?", kTitleHeight},
+      {"Keep holding to reset", kBodyHeight},
+      {count, kCountdownHeight},
+      {"Release to cancel", kNoteHeight},
   };
   drawTextBlock(config::kColorYellow, config::kTextOnYellow, lines,
                 sizeof(lines) / sizeof(lines[0]));

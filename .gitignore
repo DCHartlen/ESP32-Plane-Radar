@@ -10,3 +10,9 @@ landmark_sites.txt
 src/data/landmarks_local.inc
 .landmark_cache/
 scripts/__pycache__/
+# Written by pioarduino's framework rebuild (custom_sdkconfig in platformio.ini).
+.dummy/
+/CMakeLists.txt
+dependencies.lock
+managed_components/
+sdkconfig.*

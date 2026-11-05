@@ -7,6 +7,7 @@
 
 #include "data/large_airports.h"
 #include "hardware/display_font.h"
+#include "ui/radar_frame.h"
 #include "ui/radar_geometry.h"
 #include "ui/radar_range.h"
 #include "ui/radar_theme.h"
@@ -179,10 +180,9 @@ void drawAirportLabel(lgfx::LGFXBase& gfx, const char* ident, const Box& box) {
     s_label_boxes[s_label_box_count++] = {left, top, w, h};
   }
 
-  gfx.fillRect(left, top, w, h, radar::kColorBackground);
-  gfx.setTextDatum(textdatum_t::top_left);
-  gfx.setTextColor(radar::kColorRunwayLabel, radar::kColorBackground);
-  gfx.drawString(ident, left + kPadX, top + kPadY);
+  // Outlined like the clock, over the canvas (gfx is the canvas).
+  radar::drawOutlinedText(ident, radar::kRunwayLabelHeightPx, left + kPadX, top + kPadY,
+                          textdatum_t::top_left, radar::kColorRunwayLabel);
 }
 
 bool runwaySegment(const data::large_airports::Runway& rw, Segment* seg) {

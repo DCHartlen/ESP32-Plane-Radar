@@ -41,18 +41,41 @@ constexpr RangePreset kRangePresets[] = {
 constexpr size_t kRangePresetCount =
     sizeof(kRangePresets) / sizeof(kRangePresets[0]);
 
-/** Load saved range and distance units from flash. Call once after boot. */
+/**
+ * Weather mode's presets. The radar image is always fetched for the widest one, and the
+ * others show its centre at 2x and 4x the scale (weather_display), so each ring-3 distance
+ * must be the widest one divided by a power of two. Aircraft fields are unused.
+ */
+constexpr RangePreset kWeatherRangePresets[] = {
+    {25.0f, 25.0f * kRing3ToOuterKm, 0.0f, 0},
+    {50.0f, 50.0f * kRing3ToOuterKm, 0.0f, 0},
+    {100.0f, 100.0f * kRing3ToOuterKm, 0.0f, 0},
+};
+
+constexpr size_t kWeatherRangePresetCount =
+    sizeof(kWeatherRangePresets) / sizeof(kWeatherRangePresets[0]);
+
+/** What the screen shows; each mode keeps its own range. */
+enum class Mode : uint8_t { Plane, Weather };
+
+/** Load the saved mode, ranges and distance units from flash. Call once after boot. */
 void rangeInit();
-/** Next larger preset (zoom out), clamped at the last. False if already there. */
+Mode mode();
+/** Switches mode (saved like a range change). */
+void setMode(Mode mode);
+/** Next larger preset of the current mode (zoom out), clamped at the last. False if already there. */
 bool rangeNext();
-/** Next smaller preset (zoom in), clamped at the first. False if already there. */
+/** Next smaller preset of the current mode (zoom in), clamped at the first. False if already there. */
 bool rangePrev();
-/** Saves the range to flash once kRangeSaveDelayMs has passed since the last change. */
+/** Saves the mode and ranges to flash once kRangeSaveDelayMs has passed since the last change. */
 void rangeSaveIfDue();
+/** The current mode's preset; the projection, runways and landmarks all follow it. */
 const RangePreset& rangeCurrent();
 uint8_t rangeIndex();
 /** ADSB fetch radius (km): scaled to screen edge so beyond-ring dots have data. */
 float fetchRadiusKm();
+/** Half the width of the screen in km at a preset (centre to the edge of the square). */
+float screenHalfWidthKm(const RangePreset& preset);
 
 bool useMiles();
 bool showRunways();

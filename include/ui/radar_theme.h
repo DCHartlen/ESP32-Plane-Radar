@@ -105,13 +105,20 @@ constexpr int kClimbArrowMinFpm = 300;
 constexpr int kClimbArrowWidthPx = px(7);
 constexpr int kClimbArrowGapPx = px(2);
 
-/** RGB565 palette targets (applied in initPalette). */
+/** RGB565 palette targets (applied in applyPalette). Plane mode: navy with a green grid. */
 constexpr uint8_t kBgR = 4;
 constexpr uint8_t kBgG = 10;
 constexpr uint8_t kBgB = 28;
 constexpr uint8_t kGridR = 16;
 constexpr uint8_t kGridG = 100;
 constexpr uint8_t kGridB = 32;
+/** Weather mode: a greyer navy with a blue-grey grid, so the green rain stands out. */
+constexpr uint8_t kWeatherBgR = 8;
+constexpr uint8_t kWeatherBgG = 16;
+constexpr uint8_t kWeatherBgB = 24;
+constexpr uint8_t kWeatherGridR = 90;
+constexpr uint8_t kWeatherGridG = 110;
+constexpr uint8_t kWeatherGridB = 120;
 /** Tag type line: neutral grey, so the colours stay free for altitude. */
 constexpr uint8_t kTagTypeR = 170;
 constexpr uint8_t kTagTypeG = 180;
@@ -128,13 +135,31 @@ constexpr uint8_t kRunwayLabelR = 110;
 constexpr uint8_t kRunwayLabelG = 210;
 constexpr uint8_t kRunwayLabelB = 230;
 
-/** Landmark lines: shores and islands, rivers (dimmer), and the border. */
+/**
+ * Landmark lines: shores and islands, rivers, and the border. Rivers are a dim, greyed
+ * steel blue, so the saturated blue reads as a lake shore and the two don't blur together.
+ */
 constexpr uint8_t kShoreR = 48;
 constexpr uint8_t kShoreG = 100;
 constexpr uint8_t kShoreB = 196;
-constexpr uint8_t kRiverR = 40;
-constexpr uint8_t kRiverG = 82;
-constexpr uint8_t kRiverB = 160;
+constexpr uint8_t kRiverR = 62;
+constexpr uint8_t kRiverG = 86;
+constexpr uint8_t kRiverB = 124;
+/**
+ * Rivers fade toward the background and lose detail as the range widens: none of either up
+ * to kRiverFadeNearKm (outer ring), the full amount from kRiverFadeFarKm, linear between.
+ * At the full amount the colour is kRiverFarFade of the way to the background, and points
+ * closer than kRiverFarMinSegmentPx to the last drawn one are skipped (meanders smooth out).
+ */
+constexpr float kRiverFadeNearKm = 34.0f;
+constexpr float kRiverFadeFarKm = 133.0f;
+constexpr float kRiverFarFade = 0.5f;
+constexpr float kRiverFarMinSegmentPx = pxF(1.4f);
+/**
+ * In weather mode the rain is drawn over the landmark lines, and the lines are blended back
+ * over it at this alpha (0-255), so they show through the rain.
+ */
+constexpr uint8_t kLandmarkOverRainAlpha = 110;
 constexpr uint8_t kBorderR = 150;
 constexpr uint8_t kBorderG = 92;
 constexpr uint8_t kBorderB = 150;
@@ -177,6 +202,11 @@ constexpr float kClockCenterRingFraction = 0.66f;
 constexpr int kClockLabelHeightPx = px(30);
 /** Black outline thickness around the clock text. */
 constexpr int kClockOutlinePx = px(2.5f);
+/**
+ * Black outline around the labels (cardinals, scale, airports, the radar's age): thinner
+ * than the clock's, for text about half its height.
+ */
+constexpr float kLabelOutlinePx = pxF(1.5f);
 /** Gap between the time and its AM/PM suffix. */
 constexpr int kClockSuffixGapPx = px(2);
 

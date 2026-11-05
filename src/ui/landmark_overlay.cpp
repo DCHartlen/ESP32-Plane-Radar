@@ -10,6 +10,7 @@
 #include "config.h"
 #include "data/landmarks.h"
 #include "services/radar_location.h"
+#include "ui/radar_frame.h"
 #include "ui/radar_geometry.h"
 #include "ui/radar_range.h"
 #include "ui/radar_theme.h"
@@ -27,17 +28,24 @@ constexpr float kKmPerDeg = 111.0f;
 constexpr float kDegToRad = 3.14159265f / 180.0f;
 /**
  * Points closer than this to the last drawn one are skipped, so zoomed-out ranges don't
- * pay for detail they can't show (OSM shores have a point every few metres).
+ * pay for detail they can't show (OSM shores have a point every few metres). Rivers skip
+ * more at wide ranges (kRiverFarMinSegmentPx).
  */
 constexpr float kMinSegmentPx = 1.5f;
 
-/** What the layer was drawn for; any change redraws it. */
+/**
+ * What the layer was drawn for; any change redraws it. Keyed by distance rather than preset
+ * index, so a range both modes share (25 km) reuses the layer. The background is part of it
+ * because each mode has its own and the lines are blended onto it.
+ */
 struct LayerKey {
-  uint8_t range_index;
+  float outer_km;
   double lat;
   double lon;
+  uint16_t background;
   bool operator==(const LayerKey& o) const {
-    return range_index == o.range_index && lat == o.lat && lon == o.lon;
+    return outer_km == o.outer_km && lat == o.lat && lon == o.lon &&
+           background == o.background;
   }
 };
 
@@ -51,6 +59,8 @@ struct RowSpan {
 };
 
 LGFX_Sprite s_layer;
+/** The background the layer is filled with outside the lines. */
+uint16_t s_layer_background = 0;
 bool s_alloc_failed = false;
 bool s_layer_valid = false;
 LayerKey s_key{};
@@ -62,23 +72,38 @@ struct LineStyle {
   float half_width;
   uint16_t color;
   bool dashed;
+  float min_segment_px;
 };
+
+/** How far the current range is into the river fade: 0 up close, 1 at kRiverFadeFarKm. */
+float riverFadeAmount() {
+  const float t = (radar::rangeCurrent().outer_km - radar::kRiverFadeNearKm) /
+                  (radar::kRiverFadeFarKm - radar::kRiverFadeNearKm);
+  return std::clamp(t, 0.0f, 1.0f);
+}
 
 LineStyle styleFor(Kind kind) {
   switch (kind) {
-    case Kind::River:
-      return {radar::kRiverLineHalfWidth,
-              s_layer.color565(radar::kRiverR, radar::kRiverG, radar::kRiverB), false};
+    case Kind::River: {
+      const float t = riverFadeAmount();
+      const radar::Rgb rgb = radar::mixRgb({radar::kRiverR, radar::kRiverG, radar::kRiverB},
+                                           radar::backgroundRgb(), t * radar::kRiverFarFade);
+      return {radar::kRiverLineHalfWidth, s_layer.color565(rgb.r, rgb.g, rgb.b), false,
+              kMinSegmentPx + t * (radar::kRiverFarMinSegmentPx - kMinSegmentPx)};
+    }
     case Kind::Island:
       return {radar::kIslandLineHalfWidth,
-              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false};
+              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false,
+              kMinSegmentPx};
     case Kind::Shore:
       return {radar::kShoreLineHalfWidth,
-              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false};
+              s_layer.color565(radar::kShoreR, radar::kShoreG, radar::kShoreB), false,
+              kMinSegmentPx};
     case Kind::Border:
     default:
       return {radar::kBorderLineHalfWidth,
-              s_layer.color565(radar::kBorderR, radar::kBorderG, radar::kBorderB), true};
+              s_layer.color565(radar::kBorderR, radar::kBorderG, radar::kBorderB), true,
+              kMinSegmentPx};
   }
 }
 
@@ -99,6 +124,7 @@ bool allocateLayer(LGFX_Sprite& frame) {
   // Same rotation as the frame, so buffer rows line up for the copy.
   s_layer.setRotation(frame.getRotation());
   s_layer.fillScreen(radar::kColorBackground);
+  s_layer_background = radar::kColorBackground;
   for (RowSpan& span : s_spans) {
     span = {kW, 0};
   }
@@ -227,7 +253,7 @@ void drawDashed(float x0, float y0, float x1, float y1, const LineStyle& style,
   }
 }
 
-/** The box the outer ring covers, in dataset units (1e-5 degree). */
+/** The box the screen covers (past the outer ring, to the edge), in dataset units (1e-5 degree). */
 struct ViewBox {
   int32_t min_lat;
   int32_t max_lat;
@@ -238,9 +264,9 @@ struct ViewBox {
 ViewBox currentViewBox() {
   const double lat = services::location::lat();
   const double lon = services::location::lon();
-  const float outer_km = radar::rangeCurrent().outer_km;
-  const float dlat_deg = outer_km / kKmPerDeg;
-  const float dlon_deg = outer_km / (kKmPerDeg * cosf(static_cast<float>(lat) * kDegToRad));
+  const float half_km = radar::screenHalfWidthKm(radar::rangeCurrent());
+  const float dlat_deg = half_km / kKmPerDeg;
+  const float dlon_deg = half_km / (kKmPerDeg * cosf(static_cast<float>(lat) * kDegToRad));
   const auto units = [](double deg) {
     return static_cast<int32_t>(lround(deg * data::landmarks::kUnitsPerDeg));
   };
@@ -287,7 +313,8 @@ void drawChunk(const data::landmarks::Chunk& chunk, const LineStyle& style, floa
     float y1 = 0.0f;
     project(lat, lon, &x1, &y1);
     const bool last = i + 1 == chunk.point_count;
-    if (!last && fabsf(x1 - x0) < kMinSegmentPx && fabsf(y1 - y0) < kMinSegmentPx) {
+    if (!last && fabsf(x1 - x0) < style.min_segment_px &&
+        fabsf(y1 - y0) < style.min_segment_px) {
       continue;
     }
     if (style.dashed) {
@@ -363,8 +390,8 @@ void prepareLandmarks(LGFX_Sprite& frame) {
   if (!radar::showLandmarks()) {
     return;
   }
-  const LayerKey key{radar::rangeIndex(), services::location::lat(),
-                     services::location::lon()};
+  const LayerKey key{radar::rangeCurrent().outer_km, services::location::lat(),
+                     services::location::lon(), radar::kColorBackground};
   if (s_layer_valid && key == s_key) {
     return;
   }
@@ -373,6 +400,12 @@ void prepareLandmarks(LGFX_Sprite& frame) {
   const ViewBox view = currentViewBox();
   s_has_lines = false;
   if (anyChunkInView(view) && allocateLayer(frame)) {
+    if (s_layer_background != radar::kColorBackground) {
+      // The other mode's background: lines blend onto what's under them, and new spans can
+      // land anywhere.
+      s_layer.fillScreen(radar::kColorBackground);
+      s_layer_background = radar::kColorBackground;
+    }
     redrawLayer(view);
   }
   s_key = key;
