@@ -95,7 +95,7 @@ constexpr int32_t kPanelPclkHz = 16000000;
  */
 constexpr size_t kPanelBounceBufferPx = kDisplayWidth * 36;
 /** Rotate the whole UI 180 degrees if the panel is mounted upside down. */
-constexpr bool kDisplayRotate180 = false;
+constexpr bool kDisplayRotate180 = true;
 /** Radar frame interval (start to start) while aircraft are moving on screen. */
 constexpr unsigned long kRadarRedrawIntervalMs = 250;
 /** Status line (uptime, boot count, last reset reason) in the serial log. */
